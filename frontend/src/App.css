@@ -1,0 +1,12 @@
+/* App-level styles: intentionally minimal; design tokens live in index.css */
+
+.table-sticky-header thead {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    background: hsl(var(--card));
+}
+
+.tabular-nums {
+    font-variant-numeric: tabular-nums;
+}

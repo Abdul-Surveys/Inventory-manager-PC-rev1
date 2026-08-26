@@ -1,0 +1,945 @@
+from fastapi import FastAPI, APIRouter, HTTPException, UploadFile, File, Query
+from fastapi.responses import StreamingResponse
+from dotenv import load_dotenv
+from starlette.middleware.cors import CORSMiddleware
+from motor.motor_asyncio import AsyncIOMotorClient
+from pymongo import UpdateOne, ASCENDING, DESCENDING
+import os
+import io
+import math
+import asyncio
+import logging
+from pathlib import Path
+from pydantic import BaseModel, Field, ConfigDict
+from typing import List, Optional
+import uuid
+from datetime import datetime, timezone, timedelta
+import pandas as pd
+
+ROOT_DIR = Path(__file__).parent
+load_dotenv(ROOT_DIR / '.env')
+
+mongo_url = os.environ['MONGO_URL']
+client = AsyncIOMotorClient(mongo_url)
+db = client[os.environ['DB_NAME']]
+
+app = FastAPI(title="GPP Inventory Management System")
+api_router = APIRouter(prefix="/api")
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger("gpp-inventory")
+
+# ---------------------------- Constants ----------------------------
+ITEM_TYPES = ["Spare Parts", "Consumables", "Chemicals", "Other"]
+TXN_TYPES = ["Purchase Order", "Work Order", "Return from Work Order", "Return Other", "Opening Balance", "Adjustment"]
+STATUS_BELOW_MIN = "BELOW_MIN"
+STATUS_MINIMUM = "MINIMUM"
+STATUS_OK = "OK"
+STATUS_ABOVE_MAX = "ABOVE_MAX"
+DEFAULT_SETTINGS = {"lead_time_months": 6, "coverage_months": 6, "safety_months": 2, "non_moving_months": 12}
+
+
+# ---------------------------- Helpers ----------------------------
+
+def now_iso():
+    return datetime.now(timezone.utc).isoformat()
+
+
+def today_str():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+def compute_status(current_qty: float, min_qty: float, max_qty: float) -> str:
+    if current_qty < min_qty:
+        return STATUS_BELOW_MIN
+    if current_qty == min_qty:
+        return STATUS_MINIMUM
+    if max_qty and current_qty > max_qty:
+        return STATUS_ABOVE_MAX
+    return STATUS_OK
+
+
+def clean_item(doc):
+    if doc is None:
+        return None
+    doc.pop("_id", None)
+    return doc
+
+
+def norm_header(h: str) -> str:
+    return "".join(ch for ch in str(h).lower().strip() if ch.isalnum())
+
+
+HEADER_MAP = {
+    "itemcode": "item_code", "code": "item_code", "materialcode": "item_code", "matcode": "item_code",
+    "itemdescription": "description", "description": "description", "materialdescription": "description", "itemname": "description",
+    "uom": "uom", "unitofmeasurement": "uom", "unit": "uom",
+    "unitprice": "unit_price", "unitrate": "unit_price", "rate": "unit_price", "price": "unit_price",
+    "minqty": "min_qty", "minimumstock": "min_qty", "minstock": "min_qty", "minimum": "min_qty", "min": "min_qty",
+    "maxqty": "max_qty", "maximumstock": "max_qty", "maxstock": "max_qty", "maximum": "max_qty", "max": "max_qty",
+    "currentqty": "current_qty", "currentstock": "current_qty", "qty": "current_qty", "stock": "current_qty", "quantity": "current_qty",
+    "itemtype": "item_type", "type": "item_type", "category": "item_type",
+    "criticality": "criticality",
+}
+
+
+def to_float(v, default=0.0):
+    try:
+        if v is None or (isinstance(v, float) and math.isnan(v)):
+            return default
+        return float(v)
+    except (ValueError, TypeError):
+        return default
+
+
+def to_code(v):
+    if v is None:
+        return None
+    if isinstance(v, float):
+        if math.isnan(v):
+            return None
+        if v.is_integer():
+            return str(int(v))
+    s = str(v).strip()
+    return s if s else None
+
+
+async def get_settings_doc():
+    doc = await db.settings.find_one({"key": "global"})
+    if not doc:
+        doc = {"key": "global", **DEFAULT_SETTINGS, "updated_at": now_iso()}
+        await db.settings.insert_one(dict(doc))
+    doc.pop("_id", None)
+    return doc
+
+
+def months_between(start_date_str: str, end_dt: Optional[datetime] = None) -> float:
+    """Approx months elapsed between a YYYY-MM-DD date string and now (min 1)."""
+    try:
+        start = datetime.strptime(start_date_str[:10], "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    except (ValueError, TypeError):
+        return 1.0
+    end = end_dt or datetime.now(timezone.utc)
+    days = (end - start).days
+    return max(1.0, days / 30.44)
+
+
+def build_recommendation(avg_monthly: float, settings: dict, current_min: float, current_max: float):
+    lead = settings.get("lead_time_months", 6)
+    coverage = settings.get("coverage_months", 6)
+    safety_m = settings.get("safety_months", 2)
+    safety_stock = avg_monthly * safety_m
+    rec_min = math.ceil(avg_monthly * lead + safety_stock) if avg_monthly > 0 else 0
+    rec_max = math.ceil(rec_min + avg_monthly * coverage) if avg_monthly > 0 else 0
+    return {
+        "avg_monthly_consumption": round(avg_monthly, 2),
+        "safety_stock": round(safety_stock, 2),
+        "recommended_min": rec_min,
+        "recommended_max": rec_max,
+        "current_min": current_min,
+        "current_max": current_max,
+        "min_delta": rec_min - current_min,
+        "max_delta": rec_max - current_max,
+    }
+
+
+CONSUMPTION_GROUP = {
+    "_id": "$item_code",
+    "total_in": {"$sum": {"$cond": [{"$eq": ["$direction", "IN"]}, "$qty", 0]}},
+    "total_out": {"$sum": {"$cond": [{"$eq": ["$direction", "OUT"]}, "$qty", 0]}},
+    "wo_returns": {"$sum": {"$cond": [{"$and": [{"$eq": ["$direction", "IN"]}, {"$eq": ["$txn_type", "Return from Work Order"]}]}, "$qty", 0]}},
+    "first_receipt": {"$min": {"$cond": [{"$eq": ["$direction", "IN"]}, "$date", None]}},
+    "first_out": {"$min": {"$cond": [{"$eq": ["$direction", "OUT"]}, "$date", None]}},
+    "last_txn": {"$max": "$date"},
+    "last_out": {"$max": {"$cond": [{"$eq": ["$direction", "OUT"]}, "$date", None]}},
+    "txn_count": {"$sum": 1},
+    "has_in": {"$max": {"$cond": [{"$eq": ["$direction", "IN"]}, 1, 0]}},
+}
+
+
+# ---------------------------- Models ----------------------------
+
+class ItemCreate(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    item_code: str
+    description: str
+    uom: str = "PCS"
+    item_type: str = "Other"
+    min_qty: float = 0
+    max_qty: float = 0
+    current_qty: float = 0
+    unit_price: float = 0
+    criticality: Optional[str] = None
+
+
+class ItemUpdate(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    description: Optional[str] = None
+    uom: Optional[str] = None
+    item_type: Optional[str] = None
+    min_qty: Optional[float] = None
+    max_qty: Optional[float] = None
+    unit_price: Optional[float] = None
+    criticality: Optional[str] = None
+
+
+class TransactionCreate(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    date: str  # YYYY-MM-DD
+    item_code: str
+    direction: str  # IN / OUT
+    qty: float
+    txn_type: str
+    reference_no: Optional[str] = ""
+    notes: Optional[str] = ""
+
+
+class SettingsUpdate(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    lead_time_months: float = Field(gt=0, le=36)
+    coverage_months: float = Field(gt=0, le=36)
+    safety_months: float = Field(ge=0, le=24)
+    non_moving_months: float = Field(gt=0, le=60, default=12)
+
+
+class ApplyRecommendation(BaseModel):
+    min_qty: float
+    max_qty: float
+
+
+# ---------------------------- Meta / Settings ----------------------------
+
+@api_router.get("/")
+async def root():
+    return {"message": "GPP Inventory Management API", "status": "running"}
+
+
+@api_router.get("/meta")
+async def get_meta():
+    return {"item_types": ITEM_TYPES, "txn_types": TXN_TYPES,
+            "statuses": [STATUS_BELOW_MIN, STATUS_MINIMUM, STATUS_OK, STATUS_ABOVE_MAX]}
+
+
+@api_router.get("/settings")
+async def get_settings():
+    return await get_settings_doc()
+
+
+@api_router.put("/settings")
+async def update_settings(payload: SettingsUpdate):
+    update = payload.model_dump()
+    update["updated_at"] = now_iso()
+    await db.settings.update_one({"key": "global"}, {"$set": update}, upsert=True)
+    return await get_settings_doc()
+
+
+# ---------------------------- Items ----------------------------
+
+@api_router.get("/items")
+async def list_items(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    search: Optional[str] = None,
+    item_type: Optional[str] = None,
+    status: Optional[str] = None,
+    sort_by: str = "item_code",
+    sort_dir: str = "asc",
+):
+    q = {}
+    if search:
+        q["$or"] = [
+            {"item_code": {"$regex": search, "$options": "i"}},
+            {"description": {"$regex": search, "$options": "i"}},
+        ]
+    if item_type and item_type != "all":
+        q["item_type"] = item_type
+    if status and status != "all":
+        q["status"] = status
+    allowed_sort = {"item_code", "description", "current_qty", "min_qty", "max_qty", "unit_price", "total_value", "status", "item_type"}
+    if sort_by not in allowed_sort:
+        sort_by = "item_code"
+    direction = ASCENDING if sort_dir == "asc" else DESCENDING
+    total = await db.items.count_documents(q)
+    cursor = db.items.find(q, {"_id": 0}).collation({"locale": "en_US", "numericOrdering": True}).sort(sort_by, direction).skip((page - 1) * page_size).limit(page_size)
+    items = await cursor.to_list(page_size)
+    return {"items": items, "total": total, "page": page, "page_size": page_size,
+            "total_pages": max(1, math.ceil(total / page_size))}
+
+
+@api_router.get("/items/search")
+async def search_items(q: str = Query("", min_length=0), limit: int = 10):
+    query = {}
+    if q:
+        query["$or"] = [
+            {"item_code": {"$regex": q, "$options": "i"}},
+            {"description": {"$regex": q, "$options": "i"}},
+        ]
+    cursor = db.items.find(query, {"_id": 0, "item_code": 1, "description": 1, "uom": 1, "current_qty": 1, "unit_price": 1}).limit(limit)
+    return await cursor.to_list(limit)
+
+
+@api_router.post("/items")
+async def create_item(payload: ItemCreate):
+    code = payload.item_code.strip()
+    existing = await db.items.find_one({"item_code": code})
+    if existing:
+        raise HTTPException(status_code=400, detail=f"Item code '{code}' already exists")
+    doc = payload.model_dump()
+    doc["item_code"] = code
+    doc["item_type"] = doc.get("item_type") or "Other"
+    doc["id"] = str(uuid.uuid4())
+    doc["total_value"] = round(doc["current_qty"] * doc["unit_price"], 2)
+    doc["status"] = compute_status(doc["current_qty"], doc["min_qty"], doc["max_qty"])
+    doc["created_at"] = now_iso()
+    doc["updated_at"] = now_iso()
+    await db.items.insert_one(dict(doc))
+    if payload.current_qty > 0:
+        txn = {
+            "id": str(uuid.uuid4()), "date": today_str(), "item_code": code,
+            "item_description": doc["description"], "direction": "IN", "qty": payload.current_qty,
+            "txn_type": "Opening Balance", "reference_no": "INITIAL", "notes": "Item created with opening stock",
+            "created_at": now_iso(),
+        }
+        await db.transactions.insert_one(txn)
+    doc.pop("_id", None)
+    return doc
+
+
+@api_router.get("/items/{item_code}")
+async def get_item(item_code: str):
+    doc = await db.items.find_one({"item_code": item_code}, {"_id": 0})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Item not found")
+    return doc
+
+
+@api_router.put("/items/{item_code}")
+async def update_item(item_code: str, payload: ItemUpdate):
+    doc = await db.items.find_one({"item_code": item_code})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Item not found")
+    update = {k: v for k, v in payload.model_dump().items() if v is not None}
+    merged = {**doc, **update}
+    update["total_value"] = round(merged["current_qty"] * merged["unit_price"], 2)
+    update["status"] = compute_status(merged["current_qty"], merged["min_qty"], merged["max_qty"])
+    update["updated_at"] = now_iso()
+    await db.items.update_one({"item_code": item_code}, {"$set": update})
+    return clean_item(await db.items.find_one({"item_code": item_code}, {"_id": 0}))
+
+
+@api_router.post("/items/{item_code}/apply-recommendation")
+async def apply_recommendation(item_code: str, payload: ApplyRecommendation):
+    doc = await db.items.find_one({"item_code": item_code})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Item not found")
+    status = compute_status(doc["current_qty"], payload.min_qty, payload.max_qty)
+    await db.items.update_one({"item_code": item_code}, {"$set": {
+        "min_qty": payload.min_qty, "max_qty": payload.max_qty, "status": status, "updated_at": now_iso()}})
+    return clean_item(await db.items.find_one({"item_code": item_code}, {"_id": 0}))
+
+
+# ---------------------------- Item Analysis ----------------------------
+
+@api_router.get("/items/{item_code}/analysis")
+async def item_analysis(item_code: str):
+    item = await db.items.find_one({"item_code": item_code}, {"_id": 0})
+    if not item:
+        raise HTTPException(status_code=404, detail="Item not found")
+    settings = await get_settings_doc()
+
+    pipeline = [
+        {"$match": {"item_code": item_code}},
+        {"$group": dict(CONSUMPTION_GROUP)},
+    ]
+    agg = await db.transactions.aggregate(pipeline).to_list(1)
+    stats = agg[0] if agg else {}
+    total_out = stats.get("total_out", 0) or 0
+    wo_returns = stats.get("wo_returns", 0) or 0
+    consumption = max(0, total_out - wo_returns)
+    first_out = stats.get("first_out")
+    avg_monthly = consumption / months_between(first_out) if (consumption > 0 and first_out) else 0.0
+
+    # Monthly series (last 24 months)
+    monthly_pipeline = [
+        {"$match": {"item_code": item_code}},
+        {"$group": {
+            "_id": {"$substrCP": ["$date", 0, 7]},
+            "in_qty": {"$sum": {"$cond": [{"$eq": ["$direction", "IN"]}, "$qty", 0]}},
+            "out_qty": {"$sum": {"$cond": [{"$eq": ["$direction", "OUT"]}, "$qty", 0]}},
+            "wo_ret": {"$sum": {"$cond": [{"$and": [{"$eq": ["$direction", "IN"]}, {"$eq": ["$txn_type", "Return from Work Order"]}]}, "$qty", 0]}},
+        }},
+        {"$sort": {"_id": 1}},
+        {"$limit": 48},
+    ]
+    monthly_raw = await db.transactions.aggregate(monthly_pipeline).to_list(48)
+    cumulative = 0
+    monthly = []
+    for m in monthly_raw:
+        cons = max(0, (m["out_qty"] or 0) - (m["wo_ret"] or 0))
+        cumulative += cons
+        monthly.append({"month": m["_id"], "in_qty": m["in_qty"], "out_qty": m["out_qty"],
+                        "consumption": cons, "cumulative_consumption": cumulative})
+
+    recommendation = build_recommendation(avg_monthly, settings, item.get("min_qty", 0), item.get("max_qty", 0))
+    recent = await db.transactions.find({"item_code": item_code}, {"_id": 0}).sort("date", DESCENDING).limit(20).to_list(20)
+
+    return {
+        "item": item,
+        "total_in": stats.get("total_in", 0),
+        "total_out": total_out,
+        "wo_returns": wo_returns,
+        "total_consumption": consumption,
+        "avg_monthly_consumption": round(avg_monthly, 2),
+        "first_receipt_date": stats.get("first_receipt"),
+        "last_transaction_date": stats.get("last_txn"),
+        "monthly": monthly,
+        "recommendation": recommendation,
+        "settings": settings,
+        "recent_transactions": recent,
+    }
+
+
+# ---------------------------- Transactions ----------------------------
+
+@api_router.post("/transactions")
+async def create_transaction(payload: TransactionCreate):
+    if payload.qty <= 0:
+        raise HTTPException(status_code=400, detail="Quantity must be greater than zero")
+    if payload.direction not in ("IN", "OUT"):
+        raise HTTPException(status_code=400, detail="Direction must be IN or OUT")
+    if payload.txn_type not in TXN_TYPES:
+        raise HTTPException(status_code=400, detail=f"Invalid transaction type. Allowed: {TXN_TYPES}")
+    try:
+        datetime.strptime(payload.date[:10], "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Date must be in YYYY-MM-DD format")
+
+    item = await db.items.find_one({"item_code": payload.item_code.strip()})
+    if not item:
+        raise HTTPException(status_code=404, detail=f"Item '{payload.item_code}' not found in item master")
+
+    delta = payload.qty if payload.direction == "IN" else -payload.qty
+    new_qty = item["current_qty"] + delta
+    if new_qty < 0:
+        raise HTTPException(status_code=400, detail=f"Insufficient stock: current stock is {item['current_qty']}, cannot issue {payload.qty}")
+
+    txn = {
+        "id": str(uuid.uuid4()),
+        "date": payload.date[:10],
+        "item_code": item["item_code"],
+        "item_description": item["description"],
+        "direction": payload.direction,
+        "qty": payload.qty,
+        "txn_type": payload.txn_type,
+        "reference_no": payload.reference_no or "",
+        "notes": payload.notes or "",
+        "created_at": now_iso(),
+    }
+    await db.transactions.insert_one(dict(txn))
+
+    status = compute_status(new_qty, item["min_qty"], item["max_qty"])
+    total_value = round(new_qty * item.get("unit_price", 0), 2)
+    await db.items.update_one({"item_code": item["item_code"]}, {"$set": {
+        "current_qty": new_qty, "status": status, "total_value": total_value, "updated_at": now_iso()}})
+
+    txn.pop("_id", None)
+    return {"transaction": txn, "new_stock": new_qty, "new_status": status}
+
+
+@api_router.get("/transactions")
+async def list_transactions(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    item_code: Optional[str] = None,
+    direction: Optional[str] = None,
+    txn_type: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    search: Optional[str] = None,
+):
+    q = {}
+    if item_code:
+        q["item_code"] = item_code
+    if search:
+        q["$or"] = [
+            {"item_code": {"$regex": search, "$options": "i"}},
+            {"item_description": {"$regex": search, "$options": "i"}},
+            {"reference_no": {"$regex": search, "$options": "i"}},
+        ]
+    if direction and direction != "all":
+        q["direction"] = direction
+    if txn_type and txn_type != "all":
+        q["txn_type"] = txn_type
+    date_q = {}
+    if date_from:
+        date_q["$gte"] = date_from
+    if date_to:
+        date_q["$lte"] = date_to
+    if date_q:
+        q["date"] = date_q
+    total = await db.transactions.count_documents(q)
+    cursor = db.transactions.find(q, {"_id": 0}).sort([("date", DESCENDING), ("created_at", DESCENDING)]).skip((page - 1) * page_size).limit(page_size)
+    txns = await cursor.to_list(page_size)
+    return {"transactions": txns, "total": total, "page": page, "page_size": page_size,
+            "total_pages": max(1, math.ceil(total / page_size))}
+
+
+@api_router.post("/transactions/{txn_id}/reverse")
+async def reverse_transaction(txn_id: str):
+    txn = await db.transactions.find_one({"id": txn_id})
+    if not txn:
+        raise HTTPException(status_code=404, detail="Transaction not found")
+    if txn.get("reversed"):
+        raise HTTPException(status_code=400, detail="Transaction already reversed")
+    item = await db.items.find_one({"item_code": txn["item_code"]})
+    if not item:
+        raise HTTPException(status_code=404, detail="Item not found")
+    rev_direction = "OUT" if txn["direction"] == "IN" else "IN"
+    delta = txn["qty"] if rev_direction == "IN" else -txn["qty"]
+    new_qty = item["current_qty"] + delta
+    if new_qty < 0:
+        raise HTTPException(status_code=400, detail="Cannot reverse: would result in negative stock")
+    rev = {
+        "id": str(uuid.uuid4()), "date": today_str(), "item_code": txn["item_code"],
+        "item_description": txn["item_description"], "direction": rev_direction, "qty": txn["qty"],
+        "txn_type": "Adjustment", "reference_no": f"REV-{txn.get('reference_no', '')}",
+        "notes": f"Reversal of transaction {txn_id}", "created_at": now_iso(),
+    }
+    await db.transactions.insert_one(dict(rev))
+    await db.transactions.update_one({"id": txn_id}, {"$set": {"reversed": True}})
+    status = compute_status(new_qty, item["min_qty"], item["max_qty"])
+    await db.items.update_one({"item_code": item["item_code"]}, {"$set": {
+        "current_qty": new_qty, "status": status,
+        "total_value": round(new_qty * item.get("unit_price", 0), 2), "updated_at": now_iso()}})
+    rev.pop("_id", None)
+    return {"reversal": rev, "new_stock": new_qty}
+
+
+# ---------------------------- Import ----------------------------
+
+def parse_import_file(content: bytes, filename: str):
+    name = filename.lower()
+    if name.endswith(".csv"):
+        df = pd.read_csv(io.BytesIO(content))
+    elif name.endswith((".xlsx", ".xls")):
+        df = pd.read_excel(io.BytesIO(content))
+    else:
+        raise ValueError("Unsupported file type. Please upload .xlsx or .csv")
+    cols = {}
+    for c in df.columns:
+        mapped = HEADER_MAP.get(norm_header(c))
+        if mapped and mapped not in cols.values():
+            cols[c] = mapped
+    df = df.rename(columns=cols)
+    if "item_code" not in df.columns:
+        raise ValueError("Could not find an 'Item Code' column in the file")
+    if "description" not in df.columns:
+        raise ValueError("Could not find an 'Item Description' column in the file")
+    rows = []
+    seen = set()
+    skipped = 0
+    for rec in df.to_dict("records"):
+        code = to_code(rec.get("item_code"))
+        if not code or code in seen:
+            skipped += 1
+            continue
+        seen.add(code)
+        item_type = rec.get("item_type")
+        if isinstance(item_type, float) and math.isnan(item_type):
+            item_type = None
+        item_type = str(item_type).strip() if item_type else "Other"
+        if item_type not in ITEM_TYPES:
+            item_type = "Other"
+        crit = rec.get("criticality")
+        if isinstance(crit, float) and math.isnan(crit):
+            crit = None
+        desc = rec.get("description")
+        if isinstance(desc, float) and math.isnan(desc):
+            desc = ""
+        uom = rec.get("uom")
+        if isinstance(uom, float) and math.isnan(uom):
+            uom = "PCS"
+        rows.append({
+            "item_code": code,
+            "description": str(desc).strip() or f"Item {code}",
+            "uom": str(uom).strip().upper() or "PCS",
+            "item_type": item_type,
+            "min_qty": to_float(rec.get("min_qty")),
+            "max_qty": to_float(rec.get("max_qty")),
+            "current_qty": to_float(rec.get("current_qty")),
+            "unit_price": to_float(rec.get("unit_price")),
+            "criticality": str(crit).strip() if crit is not None else None,
+        })
+    return rows, skipped
+
+
+@api_router.post("/import/items")
+async def import_items(file: UploadFile = File(...), create_opening_balance: bool = Query(True)):
+    content = await file.read()
+    if len(content) > 60 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="File too large (max 60MB)")
+    try:
+        rows, skipped = await asyncio.to_thread(parse_import_file, content, file.filename or "upload.xlsx")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if not rows:
+        raise HTTPException(status_code=400, detail="No valid rows found in file")
+
+    existing_codes = set(await db.items.distinct("item_code"))
+    ts = now_iso()
+    ops = []
+    opening_txns = []
+    created = 0
+    updated = 0
+    for r in rows:
+        r["total_value"] = round(r["current_qty"] * r["unit_price"], 2)
+        r["status"] = compute_status(r["current_qty"], r["min_qty"], r["max_qty"])
+        r["updated_at"] = ts
+        is_new = r["item_code"] not in existing_codes
+        if is_new:
+            created += 1
+            ops.append(UpdateOne({"item_code": r["item_code"]},
+                                 {"$set": r, "$setOnInsert": {"id": str(uuid.uuid4()), "created_at": ts}},
+                                 upsert=True))
+            if create_opening_balance and r["current_qty"] > 0:
+                opening_txns.append({
+                    "id": str(uuid.uuid4()), "date": today_str(), "item_code": r["item_code"],
+                    "item_description": r["description"], "direction": "IN", "qty": r["current_qty"],
+                    "txn_type": "Opening Balance", "reference_no": "IMPORT",
+                    "notes": "Opening balance from master import", "created_at": ts,
+                })
+        else:
+            updated += 1
+            ops.append(UpdateOne({"item_code": r["item_code"]}, {"$set": r}))
+
+    BATCH = 2000
+    for i in range(0, len(ops), BATCH):
+        await db.items.bulk_write(ops[i:i + BATCH], ordered=False)
+    for i in range(0, len(opening_txns), BATCH):
+        await db.transactions.insert_many(opening_txns[i:i + BATCH], ordered=False)
+
+    return {"total_rows": len(rows), "created": created, "updated": updated,
+            "skipped": skipped, "opening_balance_transactions": len(opening_txns)}
+
+
+# ---------------------------- Dashboard ----------------------------
+
+@api_router.get("/dashboard")
+async def dashboard():
+    settings = await get_settings_doc()
+    facet = await db.items.aggregate([
+        {"$facet": {
+            "totals": [{"$group": {"_id": None, "total_value": {"$sum": "$total_value"}, "total_items": {"$sum": 1},
+                                    "total_stock_units": {"$sum": "$current_qty"}}}],
+            "by_type": [{"$group": {"_id": "$item_type", "value": {"$sum": "$total_value"}, "count": {"$sum": 1}}},
+                        {"$sort": {"value": -1}}],
+            "by_status": [{"$group": {"_id": "$status", "count": {"$sum": 1}, "value": {"$sum": "$total_value"}}}],
+            "top20": [{"$match": {"total_value": {"$gt": 0}}}, {"$sort": {"total_value": -1}}, {"$limit": 20},
+                      {"$project": {"_id": 0}}],
+        }}
+    ]).to_list(1)
+    f = facet[0]
+    totals = f["totals"][0] if f["totals"] else {"total_value": 0, "total_items": 0, "total_stock_units": 0}
+    total_value = totals.get("total_value", 0)
+    by_type = [{"item_type": b["_id"] or "Other", "value": round(b["value"], 2), "count": b["count"],
+                "pct": round((b["value"] / total_value * 100), 1) if total_value else 0} for b in f["by_type"]]
+    by_status = {b["_id"]: {"count": b["count"], "value": round(b["value"], 2)} for b in f["by_status"]}
+
+    low_stock_items = await db.items.find(
+        {"status": {"$in": [STATUS_BELOW_MIN, STATUS_MINIMUM]}}, {"_id": 0}
+    ).sort("total_value", DESCENDING).limit(10).to_list(10)
+
+    # Non-moving count
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=int(30.44 * settings.get("non_moving_months", 12)))).strftime("%Y-%m-%d")
+    nm = await db.transactions.aggregate([
+        {"$group": {"_id": "$item_code", "has_in": {"$max": {"$cond": [{"$eq": ["$direction", "IN"]}, 1, 0]}},
+                    "last_txn": {"$max": "$date"}}},
+        {"$match": {"has_in": 1, "last_txn": {"$lt": cutoff}}},
+        {"$count": "count"},
+    ]).to_list(1)
+    non_moving_count = nm[0]["count"] if nm else 0
+
+    return {
+        "total_value": round(total_value, 2),
+        "total_items": totals.get("total_items", 0),
+        "total_stock_units": totals.get("total_stock_units", 0),
+        "by_type": by_type,
+        "by_status": by_status,
+        "top20": f["top20"],
+        "low_stock_items": low_stock_items,
+        "low_stock_count": by_status.get(STATUS_BELOW_MIN, {}).get("count", 0) + by_status.get(STATUS_MINIMUM, {}).get("count", 0),
+        "non_moving_count": non_moving_count,
+        "settings": settings,
+    }
+
+
+# ---------------------------- Consumption Analysis (list) ----------------------------
+
+@api_router.get("/analysis")
+async def consumption_analysis(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    search: Optional[str] = None,
+    with_consumption_only: bool = False,
+    sort_by: str = "consumption",
+    sort_dir: str = "desc",
+):
+    settings = await get_settings_doc()
+    match_stage = {}
+    if search:
+        match_stage = {"$or": [
+            {"item_code": {"$regex": search, "$options": "i"}},
+            {"item_description": {"$regex": search, "$options": "i"}},
+        ]}
+    pipeline = []
+    if match_stage:
+        pipeline.append({"$match": match_stage})
+    pipeline.append({"$group": dict(CONSUMPTION_GROUP)})
+    pipeline.append({"$addFields": {"consumption": {"$max": [0, {"$subtract": ["$total_out", "$wo_returns"]}]}}})
+    if with_consumption_only:
+        pipeline.append({"$match": {"consumption": {"$gt": 0}}})
+    sort_field = {"consumption": "consumption", "total_out": "total_out", "last_txn": "last_txn", "item_code": "_id"}.get(sort_by, "consumption")
+    pipeline.append({"$sort": {sort_field: DESCENDING if sort_dir == "desc" else ASCENDING}})
+    pipeline.append({"$facet": {
+        "data": [{"$skip": (page - 1) * page_size}, {"$limit": page_size}],
+        "count": [{"$count": "total"}],
+    }})
+    res = await db.transactions.aggregate(pipeline).to_list(1)
+    data = res[0]["data"] if res else []
+    total = res[0]["count"][0]["total"] if res and res[0]["count"] else 0
+
+    codes = [d["_id"] for d in data]
+    items_map = {}
+    if codes:
+        async for it in db.items.find({"item_code": {"$in": codes}}, {"_id": 0}):
+            items_map[it["item_code"]] = it
+
+    rows = []
+    for d in data:
+        code = d["_id"]
+        item = items_map.get(code, {})
+        consumption = d.get("consumption", 0)
+        first_out = d.get("first_out")
+        avg_monthly = consumption / months_between(first_out) if (consumption > 0 and first_out) else 0.0
+        rec = build_recommendation(avg_monthly, settings, item.get("min_qty", 0), item.get("max_qty", 0))
+        rows.append({
+            "item_code": code,
+            "description": item.get("description", d.get("item_description", "")),
+            "uom": item.get("uom", ""),
+            "item_type": item.get("item_type", "Other"),
+            "current_qty": item.get("current_qty", 0),
+            "min_qty": item.get("min_qty", 0),
+            "max_qty": item.get("max_qty", 0),
+            "status": item.get("status", ""),
+            "total_in": d.get("total_in", 0),
+            "total_out": d.get("total_out", 0),
+            "wo_returns": d.get("wo_returns", 0),
+            "total_consumption": consumption,
+            "avg_monthly_consumption": round(avg_monthly, 2),
+            "first_receipt_date": d.get("first_receipt"),
+            "last_transaction_date": d.get("last_txn"),
+            "recommendation": rec,
+        })
+    return {"rows": rows, "total": total, "page": page, "page_size": page_size,
+            "total_pages": max(1, math.ceil(total / page_size)), "settings": settings}
+
+
+# ---------------------------- Non-Moving ----------------------------
+
+async def get_non_moving_rows(settings, limit=None):
+    months = settings.get("non_moving_months", 12)
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=int(30.44 * months))).strftime("%Y-%m-%d")
+    pipeline = [
+        {"$group": {"_id": "$item_code",
+                    "has_in": {"$max": {"$cond": [{"$eq": ["$direction", "IN"]}, 1, 0]}},
+                    "last_txn": {"$max": "$date"},
+                    "first_receipt": {"$min": {"$cond": [{"$eq": ["$direction", "IN"]}, "$date", None]}},
+                    "total_in": {"$sum": {"$cond": [{"$eq": ["$direction", "IN"]}, "$qty", 0]}}}},
+        {"$match": {"has_in": 1, "last_txn": {"$lt": cutoff}}},
+        {"$sort": {"last_txn": 1}},
+    ]
+    if limit:
+        pipeline.append({"$limit": limit})
+    data = await db.transactions.aggregate(pipeline).to_list(limit or 100000)
+    codes = [d["_id"] for d in data]
+    items_map = {}
+    if codes:
+        async for it in db.items.find({"item_code": {"$in": codes}}, {"_id": 0}):
+            items_map[it["item_code"]] = it
+    rows = []
+    for d in data:
+        item = items_map.get(d["_id"], {})
+        rows.append({
+            "item_code": d["_id"],
+            "description": item.get("description", ""),
+            "uom": item.get("uom", ""),
+            "item_type": item.get("item_type", "Other"),
+            "current_qty": item.get("current_qty", 0),
+            "total_value": item.get("total_value", 0),
+            "first_receipt_date": d.get("first_receipt"),
+            "last_transaction_date": d.get("last_txn"),
+            "classification": f"Non-Moving – {int(months // 12)} Year" if months >= 12 else f"Non-Moving – {int(months)} Months",
+        })
+    return rows, cutoff
+
+
+@api_router.get("/non-moving")
+async def non_moving(page: int = Query(1, ge=1), page_size: int = Query(50, ge=1, le=200)):
+    settings = await get_settings_doc()
+    rows, cutoff = await get_non_moving_rows(settings)
+    total = len(rows)
+    start = (page - 1) * page_size
+    return {"rows": rows[start:start + page_size], "total": total, "page": page,
+            "page_size": page_size, "total_pages": max(1, math.ceil(total / page_size)),
+            "cutoff_date": cutoff, "months": settings.get("non_moving_months", 12)}
+
+
+# ---------------------------- Exports ----------------------------
+
+def df_to_excel_response(df: pd.DataFrame, sheet: str, filename: str):
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
+        df.to_excel(writer, index=False, sheet_name=sheet[:31])
+        ws = writer.sheets[sheet[:31]]
+        for i, col in enumerate(df.columns):
+            width = max(12, min(40, int(df[col].astype(str).str.len().max() if len(df) else 12) + 2, 42))
+            ws.set_column(i, i, width)
+    buf.seek(0)
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
+
+
+STATUS_LABELS = {STATUS_BELOW_MIN: "Below Minimum", STATUS_MINIMUM: "Minimum", STATUS_OK: "OK", STATUS_ABOVE_MAX: "Above Maximum"}
+
+
+@api_router.get("/export/inventory")
+async def export_inventory(search: Optional[str] = None, item_type: Optional[str] = None, status: Optional[str] = None):
+    q = {}
+    if search:
+        q["$or"] = [{"item_code": {"$regex": search, "$options": "i"}}, {"description": {"$regex": search, "$options": "i"}}]
+    if item_type and item_type != "all":
+        q["item_type"] = item_type
+    if status and status != "all":
+        q["status"] = status
+    items = await db.items.find(q, {"_id": 0}).sort("item_code", ASCENDING).to_list(100000)
+    df = pd.DataFrame([{
+        "Item Code": i["item_code"], "Item Description": i["description"], "UOM": i["uom"],
+        "Item Type": i.get("item_type", "Other"), "Minimum Stock": i["min_qty"], "Maximum Stock": i["max_qty"],
+        "Current Stock": i["current_qty"], "Unit Rate (USD)": i["unit_price"], "Total Value (USD)": i["total_value"],
+        "Status": STATUS_LABELS.get(i.get("status"), i.get("status")), "Criticality": i.get("criticality") or "",
+    } for i in items])
+    return df_to_excel_response(df, "Inventory", "inventory_report.xlsx")
+
+
+@api_router.get("/export/transactions")
+async def export_transactions(date_from: Optional[str] = None, date_to: Optional[str] = None,
+                              direction: Optional[str] = None, txn_type: Optional[str] = None):
+    q = {}
+    if direction and direction != "all":
+        q["direction"] = direction
+    if txn_type and txn_type != "all":
+        q["txn_type"] = txn_type
+    date_q = {}
+    if date_from:
+        date_q["$gte"] = date_from
+    if date_to:
+        date_q["$lte"] = date_to
+    if date_q:
+        q["date"] = date_q
+    txns = await db.transactions.find(q, {"_id": 0}).sort("date", DESCENDING).to_list(200000)
+    df = pd.DataFrame([{
+        "Date": t["date"], "Item Code": t["item_code"], "Item Description": t["item_description"],
+        "Direction": t["direction"], "Quantity": t["qty"], "Transaction Type": t["txn_type"],
+        "Reference No": t.get("reference_no", ""), "Notes": t.get("notes", ""),
+    } for t in txns])
+    return df_to_excel_response(df, "Transactions", "transactions_report.xlsx")
+
+
+@api_router.get("/export/non-moving")
+async def export_non_moving():
+    settings = await get_settings_doc()
+    rows, cutoff = await get_non_moving_rows(settings)
+    df = pd.DataFrame([{
+        "Item Code": r["item_code"], "Item Description": r["description"], "UOM": r["uom"],
+        "Item Type": r["item_type"], "Current Stock": r["current_qty"], "Total Value (USD)": r["total_value"],
+        "First Receipt": r["first_receipt_date"], "Last Transaction": r["last_transaction_date"],
+        "Classification": r["classification"],
+    } for r in rows])
+    return df_to_excel_response(df, "Non-Moving Items", "non_moving_items.xlsx")
+
+
+@api_router.get("/export/top20")
+async def export_top20():
+    items = await db.items.find({"total_value": {"$gt": 0}}, {"_id": 0}).sort("total_value", DESCENDING).limit(20).to_list(20)
+    df = pd.DataFrame([{
+        "Rank": idx + 1, "Item Code": i["item_code"], "Item Description": i["description"], "UOM": i["uom"],
+        "Item Type": i.get("item_type", "Other"), "Current Stock": i["current_qty"],
+        "Unit Rate (USD)": i["unit_price"], "Total Value (USD)": i["total_value"],
+    } for idx, i in enumerate(items)])
+    return df_to_excel_response(df, "Top 20 High Value", "top20_high_value.xlsx")
+
+
+@api_router.get("/export/analysis")
+async def export_analysis():
+    settings = await get_settings_doc()
+    pipeline = [{"$group": dict(CONSUMPTION_GROUP)},
+                {"$addFields": {"consumption": {"$max": [0, {"$subtract": ["$total_out", "$wo_returns"]}]}}},
+                {"$sort": {"consumption": -1}}]
+    data = await db.transactions.aggregate(pipeline).to_list(100000)
+    codes = [d["_id"] for d in data]
+    items_map = {}
+    if codes:
+        async for it in db.items.find({"item_code": {"$in": codes}}, {"_id": 0}):
+            items_map[it["item_code"]] = it
+    rows = []
+    for d in data:
+        item = items_map.get(d["_id"], {})
+        consumption = d.get("consumption", 0)
+        first_out = d.get("first_out")
+        avg_monthly = consumption / months_between(first_out) if (consumption > 0 and first_out) else 0.0
+        rec = build_recommendation(avg_monthly, settings, item.get("min_qty", 0), item.get("max_qty", 0))
+        rows.append({
+            "Item Code": d["_id"], "Item Description": item.get("description", ""),
+            "Current Stock": item.get("current_qty", 0), "Total IN": d.get("total_in", 0),
+            "Total OUT": d.get("total_out", 0), "WO Returns": d.get("wo_returns", 0),
+            "Total Consumption": consumption, "Avg Monthly Consumption": round(avg_monthly, 2),
+            "First Receipt": d.get("first_receipt"), "Last Transaction": d.get("last_txn"),
+            "Current Min": item.get("min_qty", 0), "Current Max": item.get("max_qty", 0),
+            "Recommended Min": rec["recommended_min"], "Recommended Max": rec["recommended_max"],
+        })
+    df = pd.DataFrame(rows)
+    return df_to_excel_response(df, "Consumption Analysis", "consumption_analysis.xlsx")
+
+
+# ---------------------------- App wiring ----------------------------
+
+app.include_router(api_router)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_credentials=True,
+    allow_origins=os.environ.get('CORS_ORIGINS', '*').split(','),
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+@app.on_event("startup")
+async def create_indexes():
+    await db.items.create_index([("item_code", ASCENDING)], unique=True)
+    await db.items.create_index([("item_type", ASCENDING)])
+    await db.items.create_index([("status", ASCENDING)])
+    await db.items.create_index([("total_value", DESCENDING)])
+    await db.items.create_index([("description", ASCENDING)])
+    await db.transactions.create_index([("item_code", ASCENDING), ("date", DESCENDING)])
+    await db.transactions.create_index([("date", DESCENDING)])
+    await db.transactions.create_index([("direction", ASCENDING)])
+    await db.transactions.create_index([("txn_type", ASCENDING)])
+
+
+@app.on_event("shutdown")
+async def shutdown_db_client():
+    client.close()

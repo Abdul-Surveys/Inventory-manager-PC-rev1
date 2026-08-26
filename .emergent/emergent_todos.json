@@ -1,0 +1,38 @@
+[
+  {
+    "content": "Get design guidelines from design_agent",
+    "status": "completed"
+  },
+  {
+    "content": "Phase 1: Backend - models, items/transactions/import/settings APIs with indexes",
+    "status": "completed"
+  },
+  {
+    "content": "Phase 1: Frontend - Inventory, Transactions, Import pages",
+    "status": "completed"
+  },
+  {
+    "content": "Phase 2: Consumption analysis + Min/Max recommendations + Settings page",
+    "status": "completed"
+  },
+  {
+    "content": "Phase 2: Dashboard (totals, type breakdown, top 20, low-stock alerts, non-moving)",
+    "status": "completed"
+  },
+  {
+    "content": "Phase 2: Excel exports (inventory, transactions, non-moving, top 20)",
+    "status": "completed"
+  },
+  {
+    "content": "Import user's 15k material master file",
+    "status": "completed"
+  },
+  {
+    "content": "End-to-end testing via testing_agent_v3 (all user stories)",
+    "status": "completed"
+  },
+  {
+    "content": "Fix all reported bugs",
+    "status": "completed"
+  }
+]

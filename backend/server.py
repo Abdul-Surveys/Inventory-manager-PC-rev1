@@ -796,13 +796,29 @@ async def non_moving(page: int = Query(1, ge=1), page_size: int = Query(50, ge=1
 
 # ---------------------------- Exports ----------------------------
 
-def df_to_excel_response(df: pd.DataFrame, sheet: str, filename: str):
+LOGO_PATH = str(ROOT_DIR / "assets" / "logo.png")
+
+
+def write_report_header(wb, ws, title: str):
+    title_fmt = wb.add_format({"bold": True, "font_size": 14})
+    sub_fmt = wb.add_format({"font_color": "#666666", "font_size": 9})
+    if os.path.exists(LOGO_PATH):
+        ws.insert_image(0, 0, LOGO_PATH, {"x_scale": 0.085, "y_scale": 0.085, "x_offset": 4, "y_offset": 4})
+    ws.set_row(0, 22)
+    ws.write(0, 1, title, title_fmt)
+    ws.write(1, 1, "PetroChina GPP - Inventory Management System", sub_fmt)
+    ws.write(2, 1, f"Generated: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}", sub_fmt)
+
+
+def df_to_excel_response(df: pd.DataFrame, sheet: str, filename: str, title: Optional[str] = None):
     buf = io.BytesIO()
+    startrow = 4
     with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
-        df.to_excel(writer, index=False, sheet_name=sheet[:31])
+        df.to_excel(writer, index=False, sheet_name=sheet[:31], startrow=startrow)
         ws = writer.sheets[sheet[:31]]
+        write_report_header(writer.book, ws, title or sheet)
         for i, col in enumerate(df.columns):
-            width = max(12, min(40, int(df[col].astype(str).str.len().max() if len(df) else 12) + 2, 42))
+            width = max(12, min(40, int(df[col].fillna("").astype(str).str.len().max() if len(df) else 12) + 2, 42))
             ws.set_column(i, i, width)
     buf.seek(0)
     return StreamingResponse(
@@ -912,6 +928,441 @@ async def export_analysis():
         })
     df = pd.DataFrame(rows)
     return df_to_excel_response(df, "Consumption Analysis", "consumption_analysis.xlsx")
+
+
+# ---------------------------- Bulk Type Update ----------------------------
+
+class BulkTypeUpdate(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    new_type: str
+    item_codes: Optional[List[str]] = None
+    select_filter: Optional[dict] = None  # {search, item_type, status}
+
+
+@api_router.post("/items/bulk-type")
+async def bulk_update_type(payload: BulkTypeUpdate):
+    if payload.new_type not in ITEM_TYPES:
+        raise HTTPException(status_code=400, detail=f"Invalid item type. Allowed: {ITEM_TYPES}")
+    q = None
+    if payload.item_codes:
+        q = {"item_code": {"$in": payload.item_codes}}
+    elif payload.select_filter is not None:
+        f = payload.select_filter
+        q = {}
+        if f.get("search"):
+            q["$or"] = [
+                {"item_code": {"$regex": f["search"], "$options": "i"}},
+                {"description": {"$regex": f["search"], "$options": "i"}},
+            ]
+        if f.get("item_type") and f["item_type"] != "all":
+            q["item_type"] = f["item_type"]
+        if f.get("status") and f["status"] != "all":
+            q["status"] = f["status"]
+    if q is None:
+        raise HTTPException(status_code=400, detail="Provide item_codes or select_filter")
+    res = await db.items.update_many(q, {"$set": {"item_type": payload.new_type, "updated_at": now_iso()}})
+    return {"matched": res.matched_count, "modified": res.modified_count, "new_type": payload.new_type}
+
+
+# ---------------------------- Reorder Suggestions ----------------------------
+
+REORDER_PIPELINE_FIELDS = [
+    {"$addFields": {"target_qty": {"$cond": [{"$gt": ["$max_qty", "$min_qty"]}, "$max_qty", "$min_qty"]}}},
+    {"$addFields": {"suggested_qty": {"$ceil": {"$max": [0, {"$subtract": ["$target_qty", "$current_qty"]}]}}}},
+    {"$addFields": {"est_cost": {"$round": [{"$multiply": ["$suggested_qty", "$unit_price"]}, 2]}}},
+    {"$match": {"suggested_qty": {"$gt": 0}}},
+]
+
+
+def reorder_match(search, item_type, include_minimum):
+    statuses = [STATUS_BELOW_MIN] + ([STATUS_MINIMUM] if include_minimum else [])
+    q = {"status": {"$in": statuses}}
+    if search:
+        q["$or"] = [
+            {"item_code": {"$regex": search, "$options": "i"}},
+            {"description": {"$regex": search, "$options": "i"}},
+        ]
+    if item_type and item_type != "all":
+        q["item_type"] = item_type
+    return q
+
+
+@api_router.get("/reorder")
+async def reorder_suggestions(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    search: Optional[str] = None,
+    item_type: Optional[str] = None,
+    include_minimum: bool = True,
+    sort_by: str = "est_cost",
+    sort_dir: str = "desc",
+):
+    sort_field = sort_by if sort_by in {"est_cost", "suggested_qty", "current_qty", "item_code"} else "est_cost"
+    pipeline = [{"$match": reorder_match(search, item_type, include_minimum)}] + REORDER_PIPELINE_FIELDS + [
+        {"$sort": {sort_field: DESCENDING if sort_dir == "desc" else ASCENDING}},
+        {"$facet": {
+            "data": [{"$skip": (page - 1) * page_size}, {"$limit": page_size}, {"$project": {"_id": 0}}],
+            "count": [{"$count": "total"}],
+            "totals": [{"$group": {"_id": None, "total_est_cost": {"$sum": "$est_cost"}, "total_units": {"$sum": "$suggested_qty"}}}],
+        }},
+    ]
+    res = await db.items.aggregate(pipeline).to_list(1)
+    f = res[0]
+    total = f["count"][0]["total"] if f["count"] else 0
+    totals = f["totals"][0] if f["totals"] else {"total_est_cost": 0, "total_units": 0}
+    return {"rows": f["data"], "total": total, "page": page, "page_size": page_size,
+            "total_pages": max(1, math.ceil(total / page_size)),
+            "total_est_cost": round(totals.get("total_est_cost", 0), 2),
+            "total_units": totals.get("total_units", 0)}
+
+
+@api_router.get("/export/reorder")
+async def export_reorder(search: Optional[str] = None, item_type: Optional[str] = None, include_minimum: bool = True):
+    pipeline = [{"$match": reorder_match(search, item_type, include_minimum)}] + REORDER_PIPELINE_FIELDS + [
+        {"$sort": {"est_cost": -1}}, {"$project": {"_id": 0}},
+    ]
+    rows = await db.items.aggregate(pipeline).to_list(100000)
+    df = pd.DataFrame([{
+        "Item Code": r["item_code"], "Item Description": r["description"], "UOM": r["uom"],
+        "Item Type": r.get("item_type", "Other"), "Status": STATUS_LABELS.get(r.get("status"), r.get("status")),
+        "Current Stock": r["current_qty"], "Minimum": r["min_qty"], "Maximum": r["max_qty"],
+        "Target Qty": r["target_qty"], "Suggested Order Qty": r["suggested_qty"],
+        "Unit Rate (USD)": r["unit_price"], "Estimated Cost (USD)": r["est_cost"],
+    } for r in rows])
+    return df_to_excel_response(df, "Reorder Proposal", "reorder_proposal.xlsx", title="Purchase Reorder Proposal")
+
+
+# ---------------------------- Monthly Snapshot Report ----------------------------
+
+def shift_month(ym: str, delta: int) -> str:
+    y, m = int(ym[:4]), int(ym[5:7])
+    idx = y * 12 + (m - 1) + delta
+    return f"{idx // 12:04d}-{idx % 12 + 1:02d}"
+
+
+async def month_movement_stats(ym: str):
+    pipeline = [
+        {"$match": {"date": {"$regex": f"^{ym}"}}},
+        {"$group": {
+            "_id": "$item_code",
+            "in_qty": {"$sum": {"$cond": [{"$eq": ["$direction", "IN"]}, "$qty", 0]}},
+            "out_qty": {"$sum": {"$cond": [{"$eq": ["$direction", "OUT"]}, "$qty", 0]}},
+            "wo_ret": {"$sum": {"$cond": [{"$and": [{"$eq": ["$direction", "IN"]}, {"$eq": ["$txn_type", "Return from Work Order"]}]}, "$qty", 0]}},
+            "txns": {"$sum": 1},
+        }},
+    ]
+    data = await db.transactions.aggregate(pipeline).to_list(100000)
+    codes = [d["_id"] for d in data]
+    items_map = {}
+    if codes:
+        async for it in db.items.find({"item_code": {"$in": codes}}, {"_id": 0, "item_code": 1, "unit_price": 1, "description": 1, "uom": 1}):
+            items_map[it["item_code"]] = it
+    totals = {"consumption_qty": 0, "consumption_value": 0.0, "receipts_qty": 0, "receipts_value": 0.0,
+              "in_value": 0.0, "out_value": 0.0, "txn_count": 0, "items_moved": len(data), "items_consumed": 0}
+    per_item = []
+    for d in data:
+        it = items_map.get(d["_id"], {})
+        price = it.get("unit_price", 0) or 0
+        cons = max(0, (d["out_qty"] or 0) - (d["wo_ret"] or 0))
+        cons_val = round(cons * price, 2)
+        totals["consumption_qty"] += cons
+        totals["consumption_value"] += cons_val
+        totals["receipts_qty"] += d["in_qty"] or 0
+        totals["receipts_value"] += round((d["in_qty"] or 0) * price, 2)
+        totals["in_value"] += (d["in_qty"] or 0) * price
+        totals["out_value"] += (d["out_qty"] or 0) * price
+        totals["txn_count"] += d["txns"]
+        if cons > 0:
+            totals["items_consumed"] += 1
+            per_item.append({"item_code": d["_id"], "description": it.get("description", ""), "uom": it.get("uom", ""),
+                             "consumption_qty": cons, "consumption_value": cons_val})
+    for k in ("consumption_value", "receipts_value", "in_value", "out_value"):
+        totals[k] = round(totals[k], 2)
+    top_consumed = sorted(per_item, key=lambda r: r["consumption_value"], reverse=True)[:10]
+    return totals, top_consumed
+
+
+async def net_value_after(ym: str) -> float:
+    """Net movement value (IN value - OUT value) for all transactions after the end of month ym."""
+    pipeline = [
+        {"$match": {"date": {"$gt": f"{ym}-99"}}},
+        {"$group": {
+            "_id": "$item_code",
+            "in_qty": {"$sum": {"$cond": [{"$eq": ["$direction", "IN"]}, "$qty", 0]}},
+            "out_qty": {"$sum": {"$cond": [{"$eq": ["$direction", "OUT"]}, "$qty", 0]}},
+        }},
+    ]
+    data = await db.transactions.aggregate(pipeline).to_list(100000)
+    codes = [d["_id"] for d in data]
+    prices = {}
+    if codes:
+        async for it in db.items.find({"item_code": {"$in": codes}}, {"_id": 0, "item_code": 1, "unit_price": 1}):
+            prices[it["item_code"]] = it.get("unit_price", 0) or 0
+    net = 0.0
+    for d in data:
+        p = prices.get(d["_id"], 0)
+        net += ((d["in_qty"] or 0) - (d["out_qty"] or 0)) * p
+    return round(net, 2)
+
+
+def pct_change(cur, prev):
+    if not prev:
+        return None
+    return round((cur - prev) / abs(prev) * 100, 1)
+
+
+async def build_monthly_snapshot(month: Optional[str] = None):
+    now = datetime.now(timezone.utc)
+    ym = month or now.strftime("%Y-%m")
+    try:
+        datetime.strptime(ym, "%Y-%m")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="month must be in YYYY-MM format")
+    prev = shift_month(ym, -1)
+    cur_stats, top_consumed = await month_movement_stats(ym)
+    prev_stats, _ = await month_movement_stats(prev)
+
+    agg = await db.items.aggregate([{"$group": {"_id": None, "v": {"$sum": "$total_value"}}}]).to_list(1)
+    current_total_value = round(agg[0]["v"], 2) if agg else 0.0
+    end_value_cur = round(current_total_value - await net_value_after(ym), 2)
+    net_cur = round(cur_stats["in_value"] - cur_stats["out_value"], 2)
+    end_value_prev = round(end_value_cur - net_cur, 2)
+
+    return {
+        "month": ym,
+        "prev_month": prev,
+        "current": {**cur_stats, "end_inventory_value": end_value_cur},
+        "previous": {**prev_stats, "end_inventory_value": end_value_prev},
+        "deltas": {
+            "consumption_qty": cur_stats["consumption_qty"] - prev_stats["consumption_qty"],
+            "consumption_value": round(cur_stats["consumption_value"] - prev_stats["consumption_value"], 2),
+            "consumption_value_pct": pct_change(cur_stats["consumption_value"], prev_stats["consumption_value"]),
+            "receipts_value": round(cur_stats["receipts_value"] - prev_stats["receipts_value"], 2),
+            "receipts_value_pct": pct_change(cur_stats["receipts_value"], prev_stats["receipts_value"]),
+            "inventory_value": round(end_value_cur - end_value_prev, 2),
+            "inventory_value_pct": pct_change(end_value_cur, end_value_prev),
+            "txn_count": cur_stats["txn_count"] - prev_stats["txn_count"],
+        },
+        "top_consumed": top_consumed,
+    }
+
+
+@api_router.get("/reports/monthly-snapshot")
+async def monthly_snapshot(month: Optional[str] = None):
+    return await build_monthly_snapshot(month)
+
+
+@api_router.get("/export/monthly-snapshot")
+async def export_monthly_snapshot(month: Optional[str] = None):
+    snap = await build_monthly_snapshot(month)
+    cur, prv, d = snap["current"], snap["previous"], snap["deltas"]
+    summary = pd.DataFrame([
+        {"Metric": "End-of-Month Inventory Value (USD)", f"{snap['month']}": cur["end_inventory_value"], f"{snap['prev_month']}": prv["end_inventory_value"], "Change": d["inventory_value"], "Change %": d["inventory_value_pct"]},
+        {"Metric": "Consumption Value (USD)", f"{snap['month']}": cur["consumption_value"], f"{snap['prev_month']}": prv["consumption_value"], "Change": d["consumption_value"], "Change %": d["consumption_value_pct"]},
+        {"Metric": "Consumption Quantity (units)", f"{snap['month']}": cur["consumption_qty"], f"{snap['prev_month']}": prv["consumption_qty"], "Change": d["consumption_qty"], "Change %": None},
+        {"Metric": "Receipts Value (USD)", f"{snap['month']}": cur["receipts_value"], f"{snap['prev_month']}": prv["receipts_value"], "Change": d["receipts_value"], "Change %": d["receipts_value_pct"]},
+        {"Metric": "Receipts Quantity (units)", f"{snap['month']}": cur["receipts_qty"], f"{snap['prev_month']}": prv["receipts_qty"], "Change": None, "Change %": None},
+        {"Metric": "Transactions Count", f"{snap['month']}": cur["txn_count"], f"{snap['prev_month']}": prv["txn_count"], "Change": d["txn_count"], "Change %": None},
+        {"Metric": "Items with Consumption", f"{snap['month']}": cur["items_consumed"], f"{snap['prev_month']}": prv["items_consumed"], "Change": None, "Change %": None},
+    ])
+    top = pd.DataFrame([{
+        "Item Code": t["item_code"], "Item Description": t["description"], "UOM": t["uom"],
+        "Consumption Qty": t["consumption_qty"], "Consumption Value (USD)": t["consumption_value"],
+    } for t in snap["top_consumed"]])
+
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
+        summary.to_excel(writer, index=False, sheet_name="Monthly Snapshot", startrow=4)
+        ws = writer.sheets["Monthly Snapshot"]
+        write_report_header(writer.book, ws, f"Monthly Snapshot - {snap['month']} vs {snap['prev_month']}")
+        for i, col in enumerate(summary.columns):
+            ws.set_column(i, i, max(14, min(40, int(summary[col].fillna("").astype(str).str.len().max()) + 2)))
+        start2 = 4 + len(summary) + 3
+        bold = writer.book.add_format({"bold": True, "font_size": 11})
+        ws.write(start2 - 1, 0, f"Top 10 Consumed Items - {snap['month']}", bold)
+        if len(top):
+            top.to_excel(writer, index=False, sheet_name="Monthly Snapshot", startrow=start2)
+        else:
+            ws.write(start2, 0, "No consumption recorded this month.")
+    buf.seek(0)
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename=monthly_snapshot_{snap['month']}.xlsx"},
+    )
+
+
+# ---------------------------- Transaction Bulk Import ----------------------------
+
+TXN_HEADER_MAP = {
+    "date": "date", "transactiondate": "date", "txndate": "date",
+    "itemcode": "item_code", "code": "item_code", "materialcode": "item_code",
+    "direction": "direction", "inout": "direction", "transactiondirection": "direction",
+    "qty": "qty", "quantity": "qty",
+    "transactiontype": "txn_type", "type": "txn_type", "txntype": "txn_type",
+    "referenceno": "reference_no", "reference": "reference_no", "referencenumber": "reference_no", "refno": "reference_no",
+    "notes": "notes", "remarks": "notes", "comment": "notes",
+}
+
+
+def parse_txn_import_file(content: bytes, filename: str):
+    name = filename.lower()
+    if name.endswith(".csv"):
+        df = pd.read_csv(io.BytesIO(content))
+    elif name.endswith((".xlsx", ".xls")):
+        df = pd.read_excel(io.BytesIO(content))
+    else:
+        raise ValueError("Unsupported file type. Please upload .xlsx or .csv")
+    cols = {}
+    for c in df.columns:
+        mapped = TXN_HEADER_MAP.get(norm_header(c))
+        if mapped and mapped not in cols.values():
+            cols[c] = mapped
+    df = df.rename(columns=cols)
+    for required in ("date", "item_code", "direction", "qty"):
+        if required not in df.columns:
+            raise ValueError(f"Missing required column: '{required}'. Required: Date, Item Code, Direction (IN/OUT), Quantity. Optional: Transaction Type, Reference No, Notes")
+    rows = []
+    errors = []
+    for idx, rec in enumerate(df.to_dict("records")):
+        rownum = idx + 2
+        code = to_code(rec.get("item_code"))
+        if not code:
+            errors.append({"row": rownum, "error": "Missing item code"})
+            continue
+        try:
+            date_val = pd.to_datetime(rec.get("date"), errors="coerce")
+        except Exception:
+            date_val = None
+        if date_val is None or pd.isna(date_val):
+            errors.append({"row": rownum, "error": f"Invalid date for item {code}"})
+            continue
+        direction = str(rec.get("direction") or "").strip().upper()
+        if direction in ("RECEIPT", "RECEIVE", "I"):
+            direction = "IN"
+        if direction in ("ISSUE", "O"):
+            direction = "OUT"
+        if direction not in ("IN", "OUT"):
+            errors.append({"row": rownum, "error": f"Invalid direction '{rec.get('direction')}' for item {code} (must be IN or OUT)"})
+            continue
+        qty = to_float(rec.get("qty"), default=None)
+        if qty is None or qty <= 0:
+            errors.append({"row": rownum, "error": f"Invalid quantity for item {code}"})
+            continue
+        txn_type = rec.get("txn_type")
+        if isinstance(txn_type, float) and math.isnan(txn_type):
+            txn_type = None
+        txn_type = str(txn_type).strip() if txn_type else None
+        if txn_type not in TXN_TYPES:
+            txn_type = "Purchase Order" if direction == "IN" else "Work Order"
+        ref = rec.get("reference_no")
+        if isinstance(ref, float) and math.isnan(ref):
+            ref = ""
+        notes = rec.get("notes")
+        if isinstance(notes, float) and math.isnan(notes):
+            notes = ""
+        rows.append({
+            "item_code": code,
+            "date": date_val.strftime("%Y-%m-%d"),
+            "direction": direction,
+            "qty": qty,
+            "txn_type": txn_type,
+            "reference_no": str(ref).strip() if ref is not None else "",
+            "notes": str(notes).strip() if notes is not None else "",
+        })
+    return rows, errors
+
+
+@api_router.get("/import/transactions/template")
+async def transaction_import_template():
+    df = pd.DataFrame([
+        {"Date": "2025-01-15", "Item Code": "1001", "Direction": "IN", "Quantity": 10, "Transaction Type": "Purchase Order", "Reference No": "PO-2025-001", "Notes": ""},
+        {"Date": "2025-02-03", "Item Code": "1001", "Direction": "OUT", "Quantity": 4, "Transaction Type": "Work Order", "Reference No": "WO-2025-114", "Notes": ""},
+        {"Date": "2025-02-20", "Item Code": "1002", "Direction": "IN", "Quantity": 2, "Transaction Type": "Return from Work Order", "Reference No": "WO-2025-114", "Notes": "Unused material returned"},
+    ])
+    return df_to_excel_response(df, "Transactions Template", "transactions_import_template.xlsx", title="Transaction Import Template")
+
+
+@api_router.post("/import/transactions")
+async def import_transactions(file: UploadFile = File(...), apply_to_stock: bool = Query(False)):
+    content = await file.read()
+    if len(content) > 60 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="File too large (max 60MB)")
+    try:
+        rows, errors = await asyncio.to_thread(parse_txn_import_file, content, file.filename or "upload.xlsx")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if not rows and not errors:
+        raise HTTPException(status_code=400, detail="No rows found in file")
+
+    valid_codes = set(await db.items.distinct("item_code"))
+    ts = now_iso()
+    docs = []
+    desc_cache = {}
+    unknown = 0
+    for r in rows:
+        if r["item_code"] not in valid_codes:
+            unknown += 1
+            if len(errors) < 50:
+                errors.append({"row": None, "error": f"Item code '{r['item_code']}' not found in item master"})
+            continue
+        docs.append({
+            "id": str(uuid.uuid4()), "date": r["date"], "item_code": r["item_code"],
+            "item_description": "", "direction": r["direction"], "qty": r["qty"],
+            "txn_type": r["txn_type"], "reference_no": r["reference_no"], "notes": r["notes"],
+            "created_at": ts, "source": "bulk_import",
+        })
+
+    # Fill descriptions in bulk
+    codes_needed = list({d["item_code"] for d in docs})
+    if codes_needed:
+        async for it in db.items.find({"item_code": {"$in": codes_needed}}, {"_id": 0, "item_code": 1, "description": 1}):
+            desc_cache[it["item_code"]] = it["description"]
+    for d in docs:
+        d["item_description"] = desc_cache.get(d["item_code"], "")
+
+    BATCH = 2000
+    for i in range(0, len(docs), BATCH):
+        await db.transactions.insert_many(docs[i:i + BATCH], ordered=False)
+
+    items_affected = 0
+    negative_stock_items = 0
+    if apply_to_stock and docs:
+        deltas = {}
+        for d in docs:
+            deltas[d["item_code"]] = deltas.get(d["item_code"], 0) + (d["qty"] if d["direction"] == "IN" else -d["qty"])
+        affected = {}
+        async for it in db.items.find({"item_code": {"$in": list(deltas.keys())}}, {"_id": 0}):
+            affected[it["item_code"]] = it
+        ops = []
+        for code, delta in deltas.items():
+            it = affected.get(code)
+            if not it:
+                continue
+            new_qty = it["current_qty"] + delta
+            if new_qty < 0:
+                negative_stock_items += 1
+                new_qty = 0
+            ops.append(UpdateOne({"item_code": code}, {"$set": {
+                "current_qty": new_qty,
+                "status": compute_status(new_qty, it["min_qty"], it["max_qty"]),
+                "total_value": round(new_qty * it.get("unit_price", 0), 2),
+                "updated_at": ts,
+            }}))
+        for i in range(0, len(ops), BATCH):
+            await db.items.bulk_write(ops[i:i + BATCH], ordered=False)
+        items_affected = len(ops)
+
+    return {
+        "total_rows": len(rows) + len([e for e in errors if e.get("row") is not None]),
+        "imported": len(docs),
+        "skipped": (len(rows) - len(docs)) + len([e for e in errors if e.get("row") is not None]),
+        "unknown_item_codes": unknown,
+        "errors_sample": errors[:20],
+        "stock_applied": apply_to_stock,
+        "items_affected": items_affected,
+        "negative_stock_clamped": negative_stock_items,
+    }
 
 
 # ---------------------------- App wiring ----------------------------

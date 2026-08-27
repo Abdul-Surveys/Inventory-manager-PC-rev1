@@ -144,3 +144,8 @@ Core = “Import Items → Create Transactions → Current Stock & Status update
 - Testing: testing_agent iteration_1 = backend 32/32 pass, frontend ~95%; autocomplete issue FIXED and re-verified; DB reset to pristine imported state afterwards.
 - Decisions: Opening Balance IN txns on import (dated import day), negative stock blocked, txn reversal via compensating Adjustment, numeric-aware item_code sorting.
 - Phase 3 candidates (not yet done): bulk transaction import from Excel, item type bulk re-categorization, dark mode.
+
+## STATUS Phase 3 (complete)
+- DONE: Monthly Snapshot Report (/reports + /api/reports/monthly-snapshot + export), Reorder Proposals (/reorder + /api/reorder + export), Bulk Type Editing (inventory multi-select + select-all-matching + /api/items/bulk-type), Transaction Bulk Import (/api/import/transactions + template + apply-to-stock option, UI on Import/Export page), PetroChina logo in sidebar + embedded in all Excel report headers.
+- Testing: iteration_2 = backend 49/50 (1 expected-behavior note), frontend 100%; bulk-apply UI verified manually on safe item 15999 (restored).
+- User data preserved: user's own transactions on item 1001 and manual type edits untouched.

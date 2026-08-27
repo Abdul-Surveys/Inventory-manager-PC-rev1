@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { NavLink, useLocation } from "react-router-dom";
 import {
-  LayoutDashboard, Boxes, ArrowLeftRight, TrendingUp, PackageX, FileUp, Settings, Menu, Fuel,
+  LayoutDashboard, Boxes, ArrowLeftRight, TrendingUp, PackageX, FileUp, Settings, Menu, ShoppingCart, CalendarRange,
 } from "lucide-react";
 import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet";
 import { Button } from "@/components/ui/button";
@@ -11,6 +11,8 @@ const NAV = [
   { to: "/inventory", label: "Inventory", icon: Boxes, testId: "sidebar-nav-inventory-link" },
   { to: "/transactions", label: "Transactions", icon: ArrowLeftRight, testId: "sidebar-nav-transactions-link" },
   { to: "/analysis", label: "Consumption & Min/Max", icon: TrendingUp, testId: "sidebar-nav-analysis-link" },
+  { to: "/reorder", label: "Reorder Proposals", icon: ShoppingCart, testId: "sidebar-nav-reorder-link" },
+  { to: "/reports", label: "Monthly Report", icon: CalendarRange, testId: "sidebar-nav-reports-link" },
   { to: "/non-moving", label: "Non-Moving Items", icon: PackageX, testId: "sidebar-nav-non-moving-link" },
   { to: "/import-export", label: "Import / Export", icon: FileUp, testId: "sidebar-nav-import-export-link" },
   { to: "/settings", label: "Settings", icon: Settings, testId: "sidebar-nav-settings-link" },
@@ -21,6 +23,8 @@ const PAGE_TITLES = {
   "/inventory": "Main Stock / Inventory",
   "/transactions": "Warehouse Transactions",
   "/analysis": "Consumption Analysis & Min/Max Recommendations",
+  "/reorder": "Purchase Reorder Proposals",
+  "/reports": "Monthly Snapshot Report",
   "/non-moving": "Non-Moving Items",
   "/import-export": "Import / Export",
   "/settings": "Planning Settings",
@@ -52,8 +56,8 @@ const NavItems = ({ onNavigate }) => (
 
 const Brand = () => (
   <div className="flex items-center gap-3 px-6 py-5">
-    <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-primary text-primary-foreground">
-      <Fuel className="h-5 w-5" />
+    <div className="flex h-11 w-11 shrink-0 items-center justify-center overflow-hidden rounded-lg bg-white p-1 shadow-sm">
+      <img src="/logo.png" alt="PetroChina logo" data-testid="app-logo" className="h-full w-full object-contain" />
     </div>
     <div>
       <p className="font-heading text-sm font-semibold leading-tight text-white">PetroChina GPP</p>

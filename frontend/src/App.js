@@ -9,6 +9,8 @@ import Analysis from "@/pages/Analysis";
 import NonMoving from "@/pages/NonMoving";
 import ImportExport from "@/pages/ImportExport";
 import SettingsPage from "@/pages/Settings";
+import Reports from "@/pages/Reports";
+import Reorder from "@/pages/Reorder";
 
 function App() {
   return (
@@ -19,6 +21,8 @@ function App() {
           <Route path="/inventory" element={<Inventory />} />
           <Route path="/transactions" element={<Transactions />} />
           <Route path="/analysis" element={<Analysis />} />
+          <Route path="/reorder" element={<Reorder />} />
+          <Route path="/reports" element={<Reports />} />
           <Route path="/non-moving" element={<NonMoving />} />
           <Route path="/import-export" element={<ImportExport />} />
           <Route path="/settings" element={<SettingsPage />} />

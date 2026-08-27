@@ -10,10 +10,11 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { StatusChip } from "@/components/StatusChip";
 import { Paginator } from "@/components/Paginator";
 import { ItemDetailDrawer } from "@/components/ItemDetailDrawer";
+import { Checkbox } from "@/components/ui/checkbox";
 import { api, downloadReport, getErrorMessage } from "@/lib/api";
 import { formatUSD2, formatUSD, formatNumber, ITEM_TYPES, STATUS_META } from "@/lib/format";
 import { toast } from "sonner";
-import { Search, Download, Plus, ArrowUpDown } from "lucide-react";
+import { Search, Download, Plus, ArrowUpDown, Tags, X } from "lucide-react";
 
 const EMPTY_ITEM = { item_code: "", description: "", uom: "PCS", item_type: "Other", min_qty: 0, max_qty: 0, current_qty: 0, unit_price: 0 };
 
@@ -35,6 +36,10 @@ export default function Inventory() {
   const [addOpen, setAddOpen] = useState(false);
   const [newItem, setNewItem] = useState(EMPTY_ITEM);
   const [creating, setCreating] = useState(false);
+  const [selected, setSelected] = useState(() => new Set());
+  const [selectAllMatching, setSelectAllMatching] = useState(false);
+  const [bulkType, setBulkType] = useState("Spare Parts");
+  const [applyingBulk, setApplyingBulk] = useState(false);
   const debounceRef = useRef(null);
 
   const load = useCallback(async (opts = {}) => {
@@ -114,6 +119,52 @@ export default function Inventory() {
       </button>
     </th>
   );
+
+  const clearSelection = () => {
+    setSelected(new Set());
+    setSelectAllMatching(false);
+  };
+
+  const toggleRow = (code) => {
+    setSelectAllMatching(false);
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(code)) next.delete(code);
+      else next.add(code);
+      return next;
+    });
+  };
+
+  const pageAllSelected = items.length > 0 && items.every((it) => selected.has(it.item_code));
+
+  const togglePage = () => {
+    setSelectAllMatching(false);
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (pageAllSelected) items.forEach((it) => next.delete(it.item_code));
+      else items.forEach((it) => next.add(it.item_code));
+      return next;
+    });
+  };
+
+  const selectionCount = selectAllMatching ? total : selected.size;
+
+  const applyBulkType = async () => {
+    setApplyingBulk(true);
+    try {
+      const payload = selectAllMatching
+        ? { new_type: bulkType, select_filter: { search: search || undefined, item_type: itemType, status } }
+        : { new_type: bulkType, item_codes: Array.from(selected) };
+      const res = await api.post("/items/bulk-type", payload);
+      toast.success(`${formatNumber(res.data.modified)} item${res.data.modified === 1 ? "" : "s"} set to "${bulkType}"`);
+      clearSelection();
+      load();
+    } catch (e) {
+      toast.error(getErrorMessage(e));
+    } finally {
+      setApplyingBulk(false);
+    }
+  };
 
   return (
     <div className="space-y-4">
@@ -198,6 +249,31 @@ export default function Inventory() {
         </CardContent>
       </Card>
 
+      {/* Bulk action bar */}
+      {selectionCount > 0 && (
+        <div data-testid="inventory-bulk-bar" className="flex flex-wrap items-center gap-3 rounded-xl border border-primary/30 bg-primary/5 px-4 py-3">
+          <Tags className="h-4 w-4 text-primary" />
+          <p className="text-sm font-medium tabular-nums">{formatNumber(selectionCount)} item{selectionCount === 1 ? "" : "s"} selected</p>
+          {!selectAllMatching && pageAllSelected && total > selected.size && (
+            <Button data-testid="inventory-select-all-matching" variant="link" size="sm" className="h-auto p-0 text-xs" onClick={() => setSelectAllMatching(true)}>
+              Select all {formatNumber(total)} items matching current filters
+            </Button>
+          )}
+          <div className="flex-1" />
+          <span className="text-sm text-muted-foreground">Set Item Type to</span>
+          <Select value={bulkType} onValueChange={setBulkType}>
+            <SelectTrigger data-testid="inventory-bulk-type-select" className="w-[150px]"><SelectValue /></SelectTrigger>
+            <SelectContent>{ITEM_TYPES.map((t) => <SelectItem key={t} value={t}>{t}</SelectItem>)}</SelectContent>
+          </Select>
+          <Button data-testid="inventory-bulk-apply-button" size="sm" onClick={applyBulkType} disabled={applyingBulk}>
+            {applyingBulk ? "Applying..." : "Apply"}
+          </Button>
+          <Button data-testid="inventory-bulk-clear-button" variant="ghost" size="sm" onClick={clearSelection}>
+            <X className="mr-1 h-3.5 w-3.5" /> Clear
+          </Button>
+        </div>
+      )}
+
       {/* Table */}
       <Card className="rounded-xl shadow-sm">
         <CardContent className="p-0">
@@ -205,6 +281,9 @@ export default function Inventory() {
             <table data-testid="inventory-table" className="w-full text-sm">
               <thead>
                 <tr className="border-b bg-muted/40 text-left text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                  <th className="w-10 px-3 py-2">
+                    <Checkbox data-testid="inventory-select-page-checkbox" checked={pageAllSelected} onCheckedChange={togglePage} aria-label="Select all on page" />
+                  </th>
                   <SortableHead field="item_code">Item Code</SortableHead>
                   <th className="px-3 py-2">Description</th>
                   <th className="px-3 py-2">UOM</th>
@@ -220,10 +299,10 @@ export default function Inventory() {
               <tbody>
                 {loading ? (
                   [...Array(10)].map((_, i) => (
-                    <tr key={i} className="border-b"><td colSpan={10} className="px-3 py-2"><Skeleton className="h-6 w-full" /></td></tr>
+                    <tr key={i} className="border-b"><td colSpan={11} className="px-3 py-2"><Skeleton className="h-6 w-full" /></td></tr>
                   ))
                 ) : items.length === 0 ? (
-                  <tr><td colSpan={10} className="px-3 py-10 text-center text-sm text-muted-foreground">No items match your filters.</td></tr>
+                  <tr><td colSpan={11} className="px-3 py-10 text-center text-sm text-muted-foreground">No items match your filters.</td></tr>
                 ) : (
                   items.map((it) => (
                     <tr
@@ -232,6 +311,14 @@ export default function Inventory() {
                       onClick={() => { setDrawerCode(it.item_code); setDrawerOpen(true); }}
                       className="h-11 cursor-pointer border-b last:border-0 odd:bg-muted/20 transition-colors hover:bg-muted/50"
                     >
+                      <td className="px-3 py-2" onClick={(e) => e.stopPropagation()}>
+                        <Checkbox
+                          data-testid={`inventory-row-checkbox-${it.item_code}`}
+                          checked={selectAllMatching || selected.has(it.item_code)}
+                          onCheckedChange={() => toggleRow(it.item_code)}
+                          aria-label={`Select ${it.item_code}`}
+                        />
+                      </td>
                       <td className="px-3 py-2 font-mono text-xs text-primary">{it.item_code}</td>
                       <td className="px-3 py-2 max-w-[300px] truncate">{it.description}</td>
                       <td className="px-3 py-2 text-xs">{it.uom}</td>

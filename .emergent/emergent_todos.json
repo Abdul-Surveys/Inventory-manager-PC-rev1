@@ -1,38 +1,46 @@
 [
   {
-    "content": "Get design guidelines from design_agent",
+    "content": "Backend: monthly snapshot report API + export",
     "status": "completed"
   },
   {
-    "content": "Phase 1: Backend - models, items/transactions/import/settings APIs with indexes",
+    "content": "Backend: reorder suggestions API + export",
     "status": "completed"
   },
   {
-    "content": "Phase 1: Frontend - Inventory, Transactions, Import pages",
+    "content": "Backend: bulk item type update API",
     "status": "completed"
   },
   {
-    "content": "Phase 2: Consumption analysis + Min/Max recommendations + Settings page",
+    "content": "Backend: transaction bulk import API + template download",
     "status": "completed"
   },
   {
-    "content": "Phase 2: Dashboard (totals, type breakdown, top 20, low-stock alerts, non-moving)",
+    "content": "Backend: logo header in all Excel exports",
     "status": "completed"
   },
   {
-    "content": "Phase 2: Excel exports (inventory, transactions, non-moving, top 20)",
+    "content": "Frontend: logo in sidebar/header",
     "status": "completed"
   },
   {
-    "content": "Import user's 15k material master file",
+    "content": "Frontend: Monthly Report page",
     "status": "completed"
   },
   {
-    "content": "End-to-end testing via testing_agent_v3 (all user stories)",
+    "content": "Frontend: Reorder Proposals page",
     "status": "completed"
   },
   {
-    "content": "Fix all reported bugs",
+    "content": "Frontend: Inventory bulk selection + Set Type action",
+    "status": "completed"
+  },
+  {
+    "content": "Frontend: Transaction import card on Import/Export page",
+    "status": "completed"
+  },
+  {
+    "content": "Test all new features via testing_agent_v3, fix bugs",
     "status": "completed"
   }
 ]

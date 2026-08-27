@@ -139,12 +139,12 @@ def month_list(start_ym: str, end_ym: str) -> List[str]:
     return [f"{i // 12:04d}-{i % 12 + 1:02d}" for i in range(start_idx, end_idx + 1)]
 
 
-def compute_item_stats(first_in: Optional[str], monthly_out: dict, criticality, settings: dict, current_qty: float):
+def compute_item_stats(first_in: Optional[str], monthly_net: dict, criticality, settings: dict, current_qty: float):
     """Spec-compliant consumption statistics and Recommended Min/Max.
 
-    - Consumption = OUT transactions only (INs are never subtracted)
+    - Consumption = OUT transactions minus Return from Work Order (net consumption)
     - Window = First IN Date -> Report Review Date (today), calendar months, zero months included
-    - Std Dev = sample standard deviation (STDEV.S) of the monthly series
+    - Std Dev = sample standard deviation (STDEV.S) of the monthly net series
     - Safety Stock = Z x StdDev x sqrt(lead time months); Z derived from criticality
     - Rec Min (ROP) = Lead-Time Demand + Safety Stock; Rec Max = (avg x max_demand_months) + Safety Stock
     """
@@ -175,21 +175,22 @@ def compute_item_stats(first_in: Optional[str], monthly_out: dict, criticality, 
                 "confidence_reasons": ["Never received (no IN transactions)"]}
 
     months = month_list(first_in[:7], now_ym)
-    series = [float(monthly_out.get(m, 0) or 0) for m in months]
+    series = [float(monthly_net.get(m, 0) or 0) for m in months]
     n = len(series)
     cumulative = round(sum(series), 4)
     avg_monthly = cumulative / n if n else 0.0
+    avg_for_demand = max(0.0, avg_monthly)  # guard against negative net in edge cases
     std_dev = statistics.stdev(series) if n >= 2 else 0.0
-    lt_demand = avg_monthly * lead
+    lt_demand = avg_for_demand * lead
     safety_stock = z_value * std_dev * math.sqrt(lead)
     rec_min = math.ceil(lt_demand + safety_stock) if (lt_demand + safety_stock) > 0 else 0
-    six_month_demand = avg_monthly * max_months
+    six_month_demand = avg_for_demand * max_months
     rec_max = math.ceil(six_month_demand + safety_stock) if (six_month_demand + safety_stock) > 0 else 0
 
     reasons = []
     if n < 6:
         reasons.append(f"Only {n} month{'s' if n != 1 else ''} of history")
-    if cumulative == 0:
+    if cumulative <= 0:
         reasons.append("No consumption recorded")
     else:
         zero_ratio = series.count(0.0) / n if n else 1
@@ -421,7 +422,7 @@ async def item_analysis(item_code: str):
         {"item_code": item_code}, {"_id": 0, "date": 1, "direction": 1, "qty": 1, "txn_type": 1}
     ).to_list(100000)
 
-    monthly_in, monthly_out = {}, {}
+    monthly_in, monthly_out, monthly_woret = {}, {}, {}
     total_in = total_out = wo_returns = 0.0
     first_in = None
     last_txn = None
@@ -435,31 +436,34 @@ async def item_analysis(item_code: str):
                 first_in = t["date"]
             if t.get("txn_type") == "Return from Work Order":
                 wo_returns += q
+                monthly_woret[ym] = monthly_woret.get(ym, 0) + q
         else:
             monthly_out[ym] = monthly_out.get(ym, 0) + q
             total_out += q
         if last_txn is None or t["date"] > last_txn:
             last_txn = t["date"]
 
-    stats = compute_item_stats(first_in, monthly_out, item.get("criticality"), settings, item.get("current_qty", 0))
+    monthly_net = {}
+    for ym in set(list(monthly_out.keys()) + list(monthly_woret.keys())):
+        monthly_net[ym] = monthly_out.get(ym, 0) - monthly_woret.get(ym, 0)
+
+    stats = compute_item_stats(first_in, monthly_net, item.get("criticality"), settings, item.get("current_qty", 0))
 
     # Zero-filled monthly series for the chart (cap display at last 36 months)
     monthly = []
     if first_in:
         months = month_list(first_in[:7], today_str()[:7])[-36:]
-        cumulative = 0.0
         # cumulative must start from the true beginning, not the display window
         full_months = month_list(first_in[:7], today_str()[:7])
         cum_map = {}
         run = 0.0
         for m in full_months:
-            run += monthly_out.get(m, 0)
+            run += monthly_net.get(m, 0)
             cum_map[m] = run
         for m in months:
-            cons = monthly_out.get(m, 0)
-            cumulative = cum_map[m]
-            monthly.append({"month": m, "in_qty": round(monthly_in.get(m, 0), 2), "out_qty": round(cons, 2),
-                            "consumption": round(cons, 2), "cumulative_consumption": round(cumulative, 2)})
+            cons = monthly_net.get(m, 0)
+            monthly.append({"month": m, "in_qty": round(monthly_in.get(m, 0), 2), "out_qty": round(monthly_out.get(m, 0), 2),
+                            "consumption": round(cons, 2), "cumulative_consumption": round(cum_map[m], 2)})
 
     recent = await db.transactions.find({"item_code": item_code}, {"_id": 0}).sort("date", DESCENDING).limit(20).to_list(20)
 
@@ -569,35 +573,83 @@ async def list_transactions(
             "total_pages": max(1, math.ceil(total / page_size))}
 
 
-@api_router.post("/transactions/{txn_id}/reverse")
-async def reverse_transaction(txn_id: str):
+class TransactionUpdate(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    date: Optional[str] = None
+    direction: Optional[str] = None
+    qty: Optional[float] = None
+    txn_type: Optional[str] = None
+    reference_no: Optional[str] = None
+    notes: Optional[str] = None
+
+
+def txn_delta(direction: str, qty: float) -> float:
+    return qty if direction == "IN" else -qty
+
+
+@api_router.put("/transactions/{txn_id}")
+async def update_transaction(txn_id: str, payload: TransactionUpdate):
     txn = await db.transactions.find_one({"id": txn_id})
     if not txn:
         raise HTTPException(status_code=404, detail="Transaction not found")
-    if txn.get("reversed"):
-        raise HTTPException(status_code=400, detail="Transaction already reversed")
     item = await db.items.find_one({"item_code": txn["item_code"]})
     if not item:
         raise HTTPException(status_code=404, detail="Item not found")
-    rev_direction = "OUT" if txn["direction"] == "IN" else "IN"
-    delta = txn["qty"] if rev_direction == "IN" else -txn["qty"]
-    new_qty = item["current_qty"] + delta
-    if new_qty < 0:
-        raise HTTPException(status_code=400, detail="Cannot reverse: would result in negative stock")
-    rev = {
-        "id": str(uuid.uuid4()), "date": today_str(), "item_code": txn["item_code"],
-        "item_description": txn["item_description"], "direction": rev_direction, "qty": txn["qty"],
-        "txn_type": "Adjustment", "reference_no": f"REV-{txn.get('reference_no', '')}",
-        "notes": f"Reversal of transaction {txn_id}", "created_at": now_iso(),
+
+    changes = {k: v for k, v in payload.model_dump().items() if v is not None}
+    merged = {**txn, **changes}
+    if merged["qty"] <= 0:
+        raise HTTPException(status_code=400, detail="Quantity must be greater than zero")
+    if merged["direction"] not in ("IN", "OUT"):
+        raise HTTPException(status_code=400, detail="Direction must be IN or OUT")
+    if merged["txn_type"] not in TXN_TYPES:
+        raise HTTPException(status_code=400, detail=f"Invalid transaction type. Allowed: {TXN_TYPES}")
+    try:
+        datetime.strptime(merged["date"][:10], "%Y-%m-%d")
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="Date must be in YYYY-MM-DD format")
+
+    old_delta = txn_delta(txn["direction"], txn["qty"])
+    new_delta = txn_delta(merged["direction"], merged["qty"])
+    new_stock = item["current_qty"] - old_delta + new_delta
+    if new_stock < 0:
+        raise HTTPException(status_code=400, detail=f"Cannot modify: stock would become negative ({new_stock})")
+
+    update = {
+        "date": merged["date"][:10], "direction": merged["direction"], "qty": merged["qty"],
+        "txn_type": merged["txn_type"], "reference_no": merged.get("reference_no", "") or "",
+        "notes": merged.get("notes", "") or "", "updated_at": now_iso(),
     }
-    await db.transactions.insert_one(dict(rev))
-    await db.transactions.update_one({"id": txn_id}, {"$set": {"reversed": True}})
-    status = compute_status(new_qty, item["min_qty"], item["max_qty"])
+    await db.transactions.update_one({"id": txn_id}, {"$set": update})
     await db.items.update_one({"item_code": item["item_code"]}, {"$set": {
-        "current_qty": new_qty, "status": status,
-        "total_value": round(new_qty * item.get("unit_price", 0), 2), "updated_at": now_iso()}})
-    rev.pop("_id", None)
-    return {"reversal": rev, "new_stock": new_qty}
+        "current_qty": new_stock,
+        "status": compute_status(new_stock, item["min_qty"], item["max_qty"]),
+        "total_value": round(new_stock * item.get("unit_price", 0), 2),
+        "updated_at": now_iso(),
+    }})
+    updated = await db.transactions.find_one({"id": txn_id}, {"_id": 0})
+    return {"transaction": updated, "new_stock": new_stock}
+
+
+@api_router.delete("/transactions/{txn_id}")
+async def delete_transaction(txn_id: str):
+    txn = await db.transactions.find_one({"id": txn_id})
+    if not txn:
+        raise HTTPException(status_code=404, detail="Transaction not found")
+    item = await db.items.find_one({"item_code": txn["item_code"]})
+    if not item:
+        raise HTTPException(status_code=404, detail="Item not found")
+    new_stock = item["current_qty"] - txn_delta(txn["direction"], txn["qty"])
+    if new_stock < 0:
+        raise HTTPException(status_code=400, detail=f"Cannot delete: stock would become negative ({new_stock}). Adjust later transactions first.")
+    await db.transactions.delete_one({"id": txn_id})
+    await db.items.update_one({"item_code": item["item_code"]}, {"$set": {
+        "current_qty": new_stock,
+        "status": compute_status(new_stock, item["min_qty"], item["max_qty"]),
+        "total_value": round(new_stock * item.get("unit_price", 0), 2),
+        "updated_at": now_iso(),
+    }})
+    return {"deleted": txn_id, "new_stock": new_stock}
 
 
 # ---------------------------- Import ----------------------------
@@ -773,25 +825,32 @@ def analysis_group_pipeline(search: Optional[str] = None):
         {"$group": {
             "_id": {"code": "$item_code", "month": {"$substrCP": ["$date", 0, 7]}},
             "out": {"$sum": {"$cond": [{"$eq": ["$direction", "IN"]}, 0, "$qty"]}},
+            "wo_ret": {"$sum": {"$cond": [{"$and": [{"$eq": ["$direction", "IN"]}, {"$eq": ["$txn_type", "Return from Work Order"]}]}, "$qty", 0]}},
             "in_qty": {"$sum": {"$cond": [{"$eq": ["$direction", "IN"]}, "$qty", 0]}},
             "first_in": {"$min": {"$cond": [{"$eq": ["$direction", "IN"]}, "$date", None]}},
             "max_date": {"$max": "$date"},
         }},
         {"$group": {
             "_id": "$_id.code",
-            "months": {"$push": {"month": "$_id.month", "out": "$out"}},
+            "months": {"$push": {"month": "$_id.month", "out": "$out", "wo_ret": "$wo_ret"}},
             "total_out": {"$sum": "$out"},
+            "total_wo_ret": {"$sum": "$wo_ret"},
             "total_in": {"$sum": "$in_qty"},
             "first_in": {"$min": "$first_in"},
             "last_txn": {"$max": "$max_date"},
         }},
+        {"$addFields": {"net_consumption": {"$subtract": ["$total_out", "$total_wo_ret"]}}},
     ]
     return pipeline
 
 
 def build_analysis_row(d: dict, item: dict, settings: dict):
-    monthly_out = {m["month"]: m["out"] for m in d.get("months", []) if m.get("out")}
-    stats = compute_item_stats(d.get("first_in"), monthly_out, item.get("criticality"), settings, item.get("current_qty", 0))
+    monthly_net = {}
+    for m in d.get("months", []):
+        net = (m.get("out") or 0) - (m.get("wo_ret") or 0)
+        if net:
+            monthly_net[m["month"]] = net
+    stats = compute_item_stats(d.get("first_in"), monthly_net, item.get("criticality"), settings, item.get("current_qty", 0))
     return {
         "item_code": d["_id"],
         "description": item.get("description", ""),
@@ -803,6 +862,7 @@ def build_analysis_row(d: dict, item: dict, settings: dict):
         "status": item.get("status", ""),
         "total_in": d.get("total_in", 0),
         "total_out": d.get("total_out", 0),
+        "wo_returns": d.get("total_wo_ret", 0),
         "total_consumption": stats["cumulative_consumption"],
         "avg_monthly_consumption": stats["avg_monthly_consumption"],
         "first_receipt_date": d.get("first_in"),
@@ -824,8 +884,8 @@ async def consumption_analysis(
     settings = await get_settings_doc()
     pipeline = analysis_group_pipeline(search)
     if with_consumption_only:
-        pipeline.append({"$match": {"total_out": {"$gt": 0}}})
-    sort_field = {"consumption": "total_out", "total_out": "total_out", "last_txn": "last_txn", "item_code": "_id"}.get(sort_by, "total_out")
+        pipeline.append({"$match": {"net_consumption": {"$gt": 0}}})
+    sort_field = {"consumption": "net_consumption", "total_out": "total_out", "last_txn": "last_txn", "item_code": "_id"}.get(sort_by, "net_consumption")
     pipeline.append({"$sort": {sort_field: DESCENDING if sort_dir == "desc" else ASCENDING}})
     pipeline.append({"$facet": {
         "data": [{"$skip": (page - 1) * page_size}, {"$limit": page_size}],
@@ -1004,7 +1064,7 @@ async def export_top20():
 @api_router.get("/export/analysis")
 async def export_analysis():
     settings = await get_settings_doc()
-    pipeline = analysis_group_pipeline() + [{"$sort": {"total_out": -1}}]
+    pipeline = analysis_group_pipeline() + [{"$sort": {"net_consumption": -1}}]
     data = await db.transactions.aggregate(pipeline).to_list(100000)
     codes = [d["_id"] for d in data]
     items_map = {}
@@ -1024,6 +1084,7 @@ async def export_analysis():
             "Service Level %": s["service_level"], "Z-Value": s["z_value"],
             "First IN Date": s["first_in_date"], "Report Review Date": review_date,
             "Months History": s["months_history"],
+            "Total OUT": r["total_out"], "WO Returns": r["wo_returns"],
             "Cumulative Consumption": s["cumulative_consumption"],
             "Avg Monthly Consumption": s["avg_monthly_consumption"],
             "Avg Yearly Consumption": s["avg_yearly_consumption"],
@@ -1176,7 +1237,7 @@ async def month_movement_stats(ym: str):
     for d in data:
         it = items_map.get(d["_id"], {})
         price = it.get("unit_price", 0) or 0
-        cons = d["out_qty"] or 0  # consumption = OUT only (per spec)
+        cons = max(0, (d["out_qty"] or 0) - (d["wo_ret"] or 0))  # net consumption = OUT - WO returns
         cons_val = round(cons * price, 2)
         totals["consumption_qty"] += cons
         totals["consumption_value"] += cons_val

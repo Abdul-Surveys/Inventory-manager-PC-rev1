@@ -155,3 +155,8 @@ Core = “Import Items → Create Transactions → Current Stock & Status update
 - Settings migrated: lead_time_months=3, max_demand_months=6, non_moving_months=12 (coverage/safety removed). Criticality normalized to int 1/2/3 across 15k items (default 3); editable in drawer + add-item dialog.
 - Analysis page/export rebuilt to spec output columns incl Report Review Date. Snapshot consumption also OUT-only.
 - Testing: iteration_2 (2nd run) = backend 49/49 math-validated, frontend 100%. SPECTEST1 cleaned up.
+
+## STATUS Phase 5 (complete) - Net Consumption + Transaction Edit/Delete
+- Consumption formula updated: NET consumption = OUT - Return from Work Order (monthly series, cumulative, avg, stdev, snapshot, exports incl new Total OUT / WO Returns columns). Math validated: 6-mo scenario with WO return -> cum 13, avg 2.17, sd 3.37, rec 7/13, all exact.
+- Transactions: reversal REMOVED; added Edit (PUT /api/transactions/{id}, full field modification with stock recalc) and Delete (DELETE endpoint, as-if-never-happened with stock recalc, negative-stock blocked). Frontend edit dialog + delete confirm.
+- Testing: iteration_3 = 100% backend + frontend. Test items 15995/15996 cleaned.

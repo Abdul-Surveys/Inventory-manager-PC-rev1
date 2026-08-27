@@ -115,7 +115,8 @@ export default function SettingsPage() {
           </p>
 
           <div className="rounded-lg bg-muted/50 p-4 font-mono text-xs leading-6">
-            <p>Avg Monthly Consumption = Cumulative OUT ÷ calendar months since First IN Date (zero months included)</p>
+            <p>Consumption = OUT transactions − Return from Work Order (net consumption)</p>
+            <p>Avg Monthly Consumption = Cumulative Consumption ÷ calendar months since First IN Date (zero months included)</p>
             <p>Std Dev = STDEV.S of monthly consumption series</p>
             <p>Lead-Time Demand = Avg Monthly × {lead} mo</p>
             <p>Safety Stock = Z × Std Dev × √{lead}</p>

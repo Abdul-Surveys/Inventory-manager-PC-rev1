@@ -223,7 +223,7 @@ export const ItemDetailDrawer = ({ itemCode, open, onOpenChange, onChanged }) =>
 
             {data.monthly?.length > 0 && (
               <div data-testid="item-detail-consumption-chart" className="mt-4 rounded-lg border p-3">
-                <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Consumption Trend (monthly, zero months included)</p>
+                <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Consumption Trend (monthly net = OUT − WO returns, zero months included)</p>
                 <ResponsiveContainer width="100%" height={220}>
                   <ComposedChart data={data.monthly} margin={{ top: 5, right: 10, bottom: 0, left: -15 }}>
                     <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
@@ -231,7 +231,7 @@ export const ItemDetailDrawer = ({ itemCode, open, onOpenChange, onChanged }) =>
                     <YAxis tick={{ fontSize: 10 }} allowDecimals={false} />
                     <ReTooltip contentStyle={{ fontSize: 12, borderRadius: 8 }} />
                     <Legend wrapperStyle={{ fontSize: 11 }} />
-                    <Bar name="Consumption (OUT)" dataKey="consumption" fill="hsl(var(--chart-1))" radius={[3, 3, 0, 0]} maxBarSize={28} />
+                    <Bar name="Consumption (net)" dataKey="consumption" fill="hsl(var(--chart-1))" radius={[3, 3, 0, 0]} maxBarSize={28} />
                     <Line name="Cumulative" type="monotone" dataKey="cumulative_consumption" stroke="hsl(var(--chart-2))" strokeWidth={2} dot={false} />
                   </ComposedChart>
                 </ResponsiveContainer>

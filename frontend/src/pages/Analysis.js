@@ -123,7 +123,7 @@ export default function Analysis() {
           <p className="w-full text-xs text-muted-foreground">
             {reviewDate && <span className="font-medium text-foreground">Report Review Date: {formatDate(reviewDate)}.</span>}{" "}
             {settings && (
-              <>Rec. Min (ROP) = Avg Monthly × {settings.lead_time_months} mo lead time + Safety Stock · Rec. Max = Avg Monthly × {settings.max_demand_months} mo + Safety Stock · Safety Stock = Z × monthly Std Dev × √{settings.lead_time_months} (Z from criticality: 1,2 → 0.842 · 3 → 0). Consumption = OUT transactions only, measured from First IN Date, zero months included.</>
+              <>Rec. Min (ROP) = Avg Monthly × {settings.lead_time_months} mo lead time + Safety Stock · Rec. Max = Avg Monthly × {settings.max_demand_months} mo + Safety Stock · Safety Stock = Z × monthly Std Dev × √{settings.lead_time_months} (Z from criticality: 1,2 → 0.842 · 3 → 0). Consumption = OUT transactions − Return from Work Order, measured from First IN Date, zero months included.</>
             )}
           </p>
         </CardContent>

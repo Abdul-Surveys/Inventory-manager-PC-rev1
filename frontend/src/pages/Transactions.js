@@ -6,6 +6,7 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger } from "@/components/ui/alert-dialog";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Paginator } from "@/components/Paginator";
@@ -13,7 +14,7 @@ import { ItemAutocomplete } from "@/components/ItemAutocomplete";
 import { api, downloadReport, getErrorMessage } from "@/lib/api";
 import { formatNumber, TXN_TYPES } from "@/lib/format";
 import { toast } from "sonner";
-import { ArrowDownToLine, ArrowUpFromLine, Download, Search, RotateCcw } from "lucide-react";
+import { ArrowDownToLine, ArrowUpFromLine, Download, Search, Pencil, Trash2 } from "lucide-react";
 
 const FORM_TXN_TYPES = ["Purchase Order", "Work Order", "Return from Work Order", "Return Other", "Adjustment"];
 const TYPE_DEFAULT_DIRECTION = {
@@ -46,6 +47,10 @@ export default function Transactions() {
   const [dateTo, setDateTo] = useState("");
   const [loading, setLoading] = useState(true);
   const debounceRef = useRef(null);
+
+  const [editTxn, setEditTxn] = useState(null);
+  const [editForm, setEditForm] = useState(null);
+  const [savingEdit, setSavingEdit] = useState(false);
 
   const load = useCallback(async (opts = {}) => {
     setLoading(true);
@@ -110,10 +115,32 @@ export default function Transactions() {
     }
   };
 
-  const reverse = async (txn) => {
+  const openEdit = (t) => {
+    setEditTxn(t);
+    setEditForm({ date: t.date, direction: t.direction, qty: t.qty, txn_type: t.txn_type, reference_no: t.reference_no || "", notes: t.notes || "" });
+  };
+
+  const saveEdit = async () => {
+    const qty = Number(editForm.qty);
+    if (!qty || qty <= 0) { toast.error("Quantity must be greater than zero"); return; }
+    if (!editForm.date) { toast.error("Date is required"); return; }
+    setSavingEdit(true);
     try {
-      const res = await api.post(`/transactions/${txn.id}/reverse`);
-      toast.success(`Transaction reversed — new stock: ${formatNumber(res.data.new_stock)}`);
+      const res = await api.put(`/transactions/${editTxn.id}`, { ...editForm, qty });
+      toast.success(`Transaction updated — new stock: ${formatNumber(res.data.new_stock)}`);
+      setEditTxn(null);
+      load();
+    } catch (e) {
+      toast.error(getErrorMessage(e));
+    } finally {
+      setSavingEdit(false);
+    }
+  };
+
+  const deleteTxn = async (t) => {
+    try {
+      const res = await api.delete(`/transactions/${t.id}`);
+      toast.success(`Transaction deleted — new stock: ${formatNumber(res.data.new_stock)}`);
       load();
     } catch (e) {
       toast.error(getErrorMessage(e));
@@ -232,7 +259,7 @@ export default function Transactions() {
                   <th className="px-3 py-2 text-right">Qty</th>
                   <th className="px-3 py-2">Type</th>
                   <th className="px-3 py-2">Reference</th>
-                  <th className="px-3 py-2 w-10"></th>
+                  <th className="px-3 py-2 w-20 text-right">Actions</th>
                 </tr>
               </thead>
               <tbody>
@@ -244,7 +271,7 @@ export default function Transactions() {
                   <tr><td colSpan={8} className="px-3 py-10 text-center text-sm text-muted-foreground">No transactions recorded yet.</td></tr>
                 ) : (
                   txns.map((t) => (
-                    <tr key={t.id} data-testid={`txn-row-${t.id}`} className={`h-11 border-b last:border-0 odd:bg-muted/20 ${t.reversed ? "opacity-50" : ""}`}>
+                    <tr key={t.id} data-testid={`txn-row-${t.id}`} className="h-11 border-b last:border-0 odd:bg-muted/20">
                       <td className="px-3 py-2 tabular-nums text-xs">{t.date}</td>
                       <td className="px-3 py-2 font-mono text-xs text-primary">{t.item_code}</td>
                       <td className="px-3 py-2 max-w-[260px] truncate">{t.item_description}</td>
@@ -255,30 +282,33 @@ export default function Transactions() {
                         </span>
                       </td>
                       <td className="px-3 py-2 text-right font-medium tabular-nums">{formatNumber(t.qty)}</td>
-                      <td className="px-3 py-2 text-xs">{t.txn_type}{t.reversed ? " (reversed)" : ""}</td>
+                      <td className="px-3 py-2 text-xs">{t.txn_type}</td>
                       <td className="px-3 py-2 text-xs text-muted-foreground">{t.reference_no || "—"}</td>
                       <td className="px-3 py-2">
-                        {!t.reversed && t.txn_type !== "Adjustment" && (
+                        <div className="flex items-center justify-end gap-0.5">
+                          <Button data-testid={`txn-edit-${t.id}`} variant="ghost" size="icon" className="h-7 w-7 text-muted-foreground hover:text-primary" title="Edit transaction" onClick={() => openEdit(t)}>
+                            <Pencil className="h-3.5 w-3.5" />
+                          </Button>
                           <AlertDialog>
                             <AlertDialogTrigger asChild>
-                              <Button data-testid={`txn-reverse-${t.id}`} variant="ghost" size="icon" className="h-7 w-7 text-muted-foreground hover:text-destructive" title="Reverse transaction">
-                                <RotateCcw className="h-3.5 w-3.5" />
+                              <Button data-testid={`txn-delete-${t.id}`} variant="ghost" size="icon" className="h-7 w-7 text-muted-foreground hover:text-destructive" title="Delete transaction">
+                                <Trash2 className="h-3.5 w-3.5" />
                               </Button>
                             </AlertDialogTrigger>
                             <AlertDialogContent>
                               <AlertDialogHeader>
-                                <AlertDialogTitle>Reverse this transaction?</AlertDialogTitle>
+                                <AlertDialogTitle>Delete this transaction?</AlertDialogTitle>
                                 <AlertDialogDescription>
-                                  A compensating {t.direction === "IN" ? "OUT" : "IN"} adjustment of {formatNumber(t.qty)} will be created for item {t.item_code}. This keeps the audit trail intact.
+                                  {t.direction} of {formatNumber(t.qty)} for item {t.item_code} ({t.date}) will be permanently removed as if it never happened. Current stock will be recalculated accordingly.
                                 </AlertDialogDescription>
                               </AlertDialogHeader>
                               <AlertDialogFooter>
                                 <AlertDialogCancel>Cancel</AlertDialogCancel>
-                                <AlertDialogAction data-testid="txn-reverse-confirm" onClick={() => reverse(t)}>Reverse</AlertDialogAction>
+                                <AlertDialogAction data-testid="txn-delete-confirm" className="bg-destructive text-destructive-foreground hover:bg-destructive/90" onClick={() => deleteTxn(t)}>Delete</AlertDialogAction>
                               </AlertDialogFooter>
                             </AlertDialogContent>
                           </AlertDialog>
-                        )}
+                        </div>
                       </td>
                     </tr>
                   ))
@@ -291,6 +321,67 @@ export default function Transactions() {
           </div>
         </CardContent>
       </Card>
+
+      {/* Edit dialog */}
+      <Dialog open={!!editTxn} onOpenChange={(v) => !v && setEditTxn(null)}>
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle className="font-heading">Edit Transaction</DialogTitle>
+          </DialogHeader>
+          {editTxn && editForm && (
+            <>
+              <p className="text-sm text-muted-foreground">
+                <span className="font-mono text-xs text-primary">{editTxn.item_code}</span> — {editTxn.item_description}
+              </p>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <Label className="text-xs">Date *</Label>
+                  <Input data-testid="txn-edit-date-input" type="date" value={editForm.date} onChange={(e) => setEditForm({ ...editForm, date: e.target.value })} />
+                </div>
+                <div>
+                  <Label className="text-xs">Quantity *</Label>
+                  <Input data-testid="txn-edit-qty-input" type="number" min="0" value={editForm.qty} onChange={(e) => setEditForm({ ...editForm, qty: e.target.value })} />
+                </div>
+                <div>
+                  <Label className="text-xs">Direction *</Label>
+                  <ToggleGroup
+                    type="single"
+                    value={editForm.direction}
+                    onValueChange={(v) => v && setEditForm({ ...editForm, direction: v })}
+                    className="mt-0.5 grid w-full grid-cols-2 rounded-md border p-0.5"
+                  >
+                    <ToggleGroupItem data-testid="txn-edit-direction-in" value="IN" className="h-8 text-xs data-[state=on]:bg-[hsl(var(--status-ok))] data-[state=on]:text-white">IN</ToggleGroupItem>
+                    <ToggleGroupItem data-testid="txn-edit-direction-out" value="OUT" className="h-8 text-xs data-[state=on]:bg-[hsl(var(--status-below-min))] data-[state=on]:text-white">OUT</ToggleGroupItem>
+                  </ToggleGroup>
+                </div>
+                <div>
+                  <Label className="text-xs">Transaction Type *</Label>
+                  <Select value={editForm.txn_type} onValueChange={(v) => setEditForm({ ...editForm, txn_type: v })}>
+                    <SelectTrigger data-testid="txn-edit-type-select"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      {TXN_TYPES.map((t) => <SelectItem key={t} value={t}>{t}</SelectItem>)}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="col-span-2">
+                  <Label className="text-xs">Reference No</Label>
+                  <Input data-testid="txn-edit-reference-input" value={editForm.reference_no} onChange={(e) => setEditForm({ ...editForm, reference_no: e.target.value })} />
+                </div>
+                <div className="col-span-2">
+                  <Label className="text-xs">Notes</Label>
+                  <Textarea data-testid="txn-edit-notes-input" rows={2} value={editForm.notes} onChange={(e) => setEditForm({ ...editForm, notes: e.target.value })} />
+                </div>
+              </div>
+              <DialogFooter>
+                <Button variant="ghost" onClick={() => setEditTxn(null)}>Cancel</Button>
+                <Button data-testid="txn-edit-save-button" onClick={saveEdit} disabled={savingEdit}>
+                  {savingEdit ? "Saving..." : "Save Changes"}
+                </Button>
+              </DialogFooter>
+            </>
+          )}
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

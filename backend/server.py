@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field, ConfigDict
 from typing import List, Optional
 import uuid
 from datetime import datetime, timezone, timedelta
+import statistics
 import pandas as pd
 
 ROOT_DIR = Path(__file__).parent
@@ -36,7 +37,11 @@ STATUS_BELOW_MIN = "BELOW_MIN"
 STATUS_MINIMUM = "MINIMUM"
 STATUS_OK = "OK"
 STATUS_ABOVE_MAX = "ABOVE_MAX"
-DEFAULT_SETTINGS = {"lead_time_months": 6, "coverage_months": 6, "safety_months": 2, "non_moving_months": 12}
+DEFAULT_SETTINGS = {"lead_time_months": 3, "max_demand_months": 6, "non_moving_months": 12}
+
+# Criticality -> (Service Level %, Z-value of standard normal quantile)
+Z_TABLE = {1: (80, 0.842), 2: (80, 0.842), 3: (50, 0.0)}
+CRITICALITY_LABELS = {1: "Critical Spare", 2: "Important Operational", 3: "Normal / Non-Critical"}
 
 
 # ---------------------------- Helpers ----------------------------
@@ -113,34 +118,97 @@ async def get_settings_doc():
     return doc
 
 
-def months_between(start_date_str: str, end_dt: Optional[datetime] = None) -> float:
-    """Approx months elapsed between a YYYY-MM-DD date string and now (min 1)."""
+def normalize_criticality(v) -> int:
+    """Normalize any stored criticality value to 1/2/3 (default 3 = Normal)."""
     try:
-        start = datetime.strptime(start_date_str[:10], "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        n = int(float(str(v).strip()))
+        return n if n in (1, 2, 3) else 3
     except (ValueError, TypeError):
-        return 1.0
-    end = end_dt or datetime.now(timezone.utc)
-    days = (end - start).days
-    return max(1.0, days / 30.44)
+        return 3
 
 
-def build_recommendation(avg_monthly: float, settings: dict, current_min: float, current_max: float):
-    lead = settings.get("lead_time_months", 6)
-    coverage = settings.get("coverage_months", 6)
-    safety_m = settings.get("safety_months", 2)
-    safety_stock = avg_monthly * safety_m
-    rec_min = math.ceil(avg_monthly * lead + safety_stock) if avg_monthly > 0 else 0
-    rec_max = math.ceil(rec_min + avg_monthly * coverage) if avg_monthly > 0 else 0
-    return {
-        "avg_monthly_consumption": round(avg_monthly, 2),
-        "safety_stock": round(safety_stock, 2),
-        "recommended_min": rec_min,
-        "recommended_max": rec_max,
-        "current_min": current_min,
-        "current_max": current_max,
-        "min_delta": rec_min - current_min,
-        "max_delta": rec_max - current_max,
+def month_list(start_ym: str, end_ym: str) -> List[str]:
+    """Inclusive list of YYYY-MM months between two month keys."""
+    try:
+        y1, m1 = int(start_ym[:4]), int(start_ym[5:7])
+        y2, m2 = int(end_ym[:4]), int(end_ym[5:7])
+    except (ValueError, TypeError):
+        return []
+    start_idx = y1 * 12 + m1 - 1
+    end_idx = max(y2 * 12 + m2 - 1, start_idx)
+    return [f"{i // 12:04d}-{i % 12 + 1:02d}" for i in range(start_idx, end_idx + 1)]
+
+
+def compute_item_stats(first_in: Optional[str], monthly_out: dict, criticality, settings: dict, current_qty: float):
+    """Spec-compliant consumption statistics and Recommended Min/Max.
+
+    - Consumption = OUT transactions only (INs are never subtracted)
+    - Window = First IN Date -> Report Review Date (today), calendar months, zero months included
+    - Std Dev = sample standard deviation (STDEV.S) of the monthly series
+    - Safety Stock = Z x StdDev x sqrt(lead time months); Z derived from criticality
+    - Rec Min (ROP) = Lead-Time Demand + Safety Stock; Rec Max = (avg x max_demand_months) + Safety Stock
+    """
+    review_date = today_str()
+    now_ym = review_date[:7]
+    crit = normalize_criticality(criticality)
+    service_level, z_value = Z_TABLE[crit]
+    lead = float(settings.get("lead_time_months", 3))
+    max_months = float(settings.get("max_demand_months", 6))
+
+    base = {
+        "criticality": crit,
+        "criticality_label": CRITICALITY_LABELS[crit],
+        "service_level": service_level,
+        "z_value": z_value,
+        "report_review_date": review_date,
+        "first_in_date": first_in,
+        "lead_time_months": lead,
+        "max_demand_months": max_months,
     }
+
+    if not first_in:
+        return {**base, "months_history": 0, "cumulative_consumption": 0,
+                "avg_monthly_consumption": 0, "avg_yearly_consumption": 0,
+                "consumption_std_dev": 0, "lead_time_demand": 0, "safety_stock": 0,
+                "recommended_min": 0, "six_month_demand": 0, "recommended_max": 0,
+                "stock_status": "OK", "confidence": "LOW",
+                "confidence_reasons": ["Never received (no IN transactions)"]}
+
+    months = month_list(first_in[:7], now_ym)
+    series = [float(monthly_out.get(m, 0) or 0) for m in months]
+    n = len(series)
+    cumulative = round(sum(series), 4)
+    avg_monthly = cumulative / n if n else 0.0
+    std_dev = statistics.stdev(series) if n >= 2 else 0.0
+    lt_demand = avg_monthly * lead
+    safety_stock = z_value * std_dev * math.sqrt(lead)
+    rec_min = math.ceil(lt_demand + safety_stock) if (lt_demand + safety_stock) > 0 else 0
+    six_month_demand = avg_monthly * max_months
+    rec_max = math.ceil(six_month_demand + safety_stock) if (six_month_demand + safety_stock) > 0 else 0
+
+    reasons = []
+    if n < 6:
+        reasons.append(f"Only {n} month{'s' if n != 1 else ''} of history")
+    if cumulative == 0:
+        reasons.append("No consumption recorded")
+    else:
+        zero_ratio = series.count(0.0) / n if n else 1
+        if zero_ratio > 0.66:
+            reasons.append(f"Intermittent demand ({round(zero_ratio * 100)}% zero months)")
+    stock_status = "REORDER" if (rec_min > 0 and current_qty <= rec_min) else "OK"
+
+    return {**base, "months_history": n, "cumulative_consumption": cumulative,
+            "avg_monthly_consumption": round(avg_monthly, 2),
+            "avg_yearly_consumption": round(avg_monthly * 12, 2),
+            "consumption_std_dev": round(std_dev, 2),
+            "lead_time_demand": round(lt_demand, 2),
+            "safety_stock": round(safety_stock, 2),
+            "recommended_min": rec_min,
+            "six_month_demand": round(six_month_demand, 2),
+            "recommended_max": rec_max,
+            "stock_status": stock_status,
+            "confidence": "LOW" if reasons else "NORMAL",
+            "confidence_reasons": reasons}
 
 
 CONSUMPTION_GROUP = {
@@ -169,7 +237,7 @@ class ItemCreate(BaseModel):
     max_qty: float = 0
     current_qty: float = 0
     unit_price: float = 0
-    criticality: Optional[str] = None
+    criticality: Optional[int] = 3
 
 
 class ItemUpdate(BaseModel):
@@ -180,7 +248,7 @@ class ItemUpdate(BaseModel):
     min_qty: Optional[float] = None
     max_qty: Optional[float] = None
     unit_price: Optional[float] = None
-    criticality: Optional[str] = None
+    criticality: Optional[int] = None
 
 
 class TransactionCreate(BaseModel):
@@ -196,9 +264,8 @@ class TransactionCreate(BaseModel):
 
 class SettingsUpdate(BaseModel):
     model_config = ConfigDict(extra="ignore")
-    lead_time_months: float = Field(gt=0, le=36)
-    coverage_months: float = Field(gt=0, le=36)
-    safety_months: float = Field(ge=0, le=24)
+    lead_time_months: float = Field(gt=0, le=24, default=3)
+    max_demand_months: float = Field(gt=0, le=36, default=6)
     non_moving_months: float = Field(gt=0, le=60, default=12)
 
 
@@ -287,6 +354,7 @@ async def create_item(payload: ItemCreate):
     doc = payload.model_dump()
     doc["item_code"] = code
     doc["item_type"] = doc.get("item_type") or "Other"
+    doc["criticality"] = normalize_criticality(doc.get("criticality"))
     doc["id"] = str(uuid.uuid4())
     doc["total_value"] = round(doc["current_qty"] * doc["unit_price"], 2)
     doc["status"] = compute_status(doc["current_qty"], doc["min_qty"], doc["max_qty"])
@@ -319,6 +387,8 @@ async def update_item(item_code: str, payload: ItemUpdate):
     if not doc:
         raise HTTPException(status_code=404, detail="Item not found")
     update = {k: v for k, v in payload.model_dump().items() if v is not None}
+    if "criticality" in update:
+        update["criticality"] = normalize_criticality(update["criticality"])
     merged = {**doc, **update}
     update["total_value"] = round(merged["current_qty"] * merged["unit_price"], 2)
     update["status"] = compute_status(merged["current_qty"], merged["min_qty"], merged["max_qty"])
@@ -347,53 +417,68 @@ async def item_analysis(item_code: str):
         raise HTTPException(status_code=404, detail="Item not found")
     settings = await get_settings_doc()
 
-    pipeline = [
-        {"$match": {"item_code": item_code}},
-        {"$group": dict(CONSUMPTION_GROUP)},
-    ]
-    agg = await db.transactions.aggregate(pipeline).to_list(1)
-    stats = agg[0] if agg else {}
-    total_out = stats.get("total_out", 0) or 0
-    wo_returns = stats.get("wo_returns", 0) or 0
-    consumption = max(0, total_out - wo_returns)
-    first_out = stats.get("first_out")
-    avg_monthly = consumption / months_between(first_out) if (consumption > 0 and first_out) else 0.0
+    txns = await db.transactions.find(
+        {"item_code": item_code}, {"_id": 0, "date": 1, "direction": 1, "qty": 1, "txn_type": 1}
+    ).to_list(100000)
 
-    # Monthly series (last 24 months)
-    monthly_pipeline = [
-        {"$match": {"item_code": item_code}},
-        {"$group": {
-            "_id": {"$substrCP": ["$date", 0, 7]},
-            "in_qty": {"$sum": {"$cond": [{"$eq": ["$direction", "IN"]}, "$qty", 0]}},
-            "out_qty": {"$sum": {"$cond": [{"$eq": ["$direction", "OUT"]}, "$qty", 0]}},
-            "wo_ret": {"$sum": {"$cond": [{"$and": [{"$eq": ["$direction", "IN"]}, {"$eq": ["$txn_type", "Return from Work Order"]}]}, "$qty", 0]}},
-        }},
-        {"$sort": {"_id": 1}},
-        {"$limit": 48},
-    ]
-    monthly_raw = await db.transactions.aggregate(monthly_pipeline).to_list(48)
-    cumulative = 0
+    monthly_in, monthly_out = {}, {}
+    total_in = total_out = wo_returns = 0.0
+    first_in = None
+    last_txn = None
+    for t in txns:
+        ym = t["date"][:7]
+        q = t["qty"] or 0
+        if t["direction"] == "IN":
+            monthly_in[ym] = monthly_in.get(ym, 0) + q
+            total_in += q
+            if first_in is None or t["date"] < first_in:
+                first_in = t["date"]
+            if t.get("txn_type") == "Return from Work Order":
+                wo_returns += q
+        else:
+            monthly_out[ym] = monthly_out.get(ym, 0) + q
+            total_out += q
+        if last_txn is None or t["date"] > last_txn:
+            last_txn = t["date"]
+
+    stats = compute_item_stats(first_in, monthly_out, item.get("criticality"), settings, item.get("current_qty", 0))
+
+    # Zero-filled monthly series for the chart (cap display at last 36 months)
     monthly = []
-    for m in monthly_raw:
-        cons = max(0, (m["out_qty"] or 0) - (m["wo_ret"] or 0))
-        cumulative += cons
-        monthly.append({"month": m["_id"], "in_qty": m["in_qty"], "out_qty": m["out_qty"],
-                        "consumption": cons, "cumulative_consumption": cumulative})
+    if first_in:
+        months = month_list(first_in[:7], today_str()[:7])[-36:]
+        cumulative = 0.0
+        # cumulative must start from the true beginning, not the display window
+        full_months = month_list(first_in[:7], today_str()[:7])
+        cum_map = {}
+        run = 0.0
+        for m in full_months:
+            run += monthly_out.get(m, 0)
+            cum_map[m] = run
+        for m in months:
+            cons = monthly_out.get(m, 0)
+            cumulative = cum_map[m]
+            monthly.append({"month": m, "in_qty": round(monthly_in.get(m, 0), 2), "out_qty": round(cons, 2),
+                            "consumption": round(cons, 2), "cumulative_consumption": round(cumulative, 2)})
 
-    recommendation = build_recommendation(avg_monthly, settings, item.get("min_qty", 0), item.get("max_qty", 0))
     recent = await db.transactions.find({"item_code": item_code}, {"_id": 0}).sort("date", DESCENDING).limit(20).to_list(20)
 
     return {
         "item": item,
-        "total_in": stats.get("total_in", 0),
-        "total_out": total_out,
-        "wo_returns": wo_returns,
-        "total_consumption": consumption,
-        "avg_monthly_consumption": round(avg_monthly, 2),
-        "first_receipt_date": stats.get("first_receipt"),
-        "last_transaction_date": stats.get("last_txn"),
+        "total_in": round(total_in, 2),
+        "total_out": round(total_out, 2),
+        "wo_returns": round(wo_returns, 2),
+        "total_consumption": stats["cumulative_consumption"],
+        "avg_monthly_consumption": stats["avg_monthly_consumption"],
+        "first_receipt_date": first_in,
+        "last_transaction_date": last_txn,
         "monthly": monthly,
-        "recommendation": recommendation,
+        "stats": stats,
+        "recommendation": {
+            **stats,
+            "current_min": item.get("min_qty", 0),
+            "current_max": item.get("max_qty", 0),
+        },
         "settings": settings,
         "recent_transactions": recent,
     }
@@ -553,6 +638,7 @@ def parse_import_file(content: bytes, filename: str):
         crit = rec.get("criticality")
         if isinstance(crit, float) and math.isnan(crit):
             crit = None
+        crit_val = normalize_criticality(crit) if crit is not None else 3
         desc = rec.get("description")
         if isinstance(desc, float) and math.isnan(desc):
             desc = ""
@@ -568,7 +654,7 @@ def parse_import_file(content: bytes, filename: str):
             "max_qty": to_float(rec.get("max_qty")),
             "current_qty": to_float(rec.get("current_qty")),
             "unit_price": to_float(rec.get("unit_price")),
-            "criticality": str(crit).strip() if crit is not None else None,
+            "criticality": crit_val,
         })
     return rows, skipped
 
@@ -675,6 +761,57 @@ async def dashboard():
 
 # ---------------------------- Consumption Analysis (list) ----------------------------
 
+def analysis_group_pipeline(search: Optional[str] = None):
+    """Two-stage grouping: per item+month OUT totals, then per item with months array."""
+    pipeline = []
+    if search:
+        pipeline.append({"$match": {"$or": [
+            {"item_code": {"$regex": search, "$options": "i"}},
+            {"item_description": {"$regex": search, "$options": "i"}},
+        ]}})
+    pipeline += [
+        {"$group": {
+            "_id": {"code": "$item_code", "month": {"$substrCP": ["$date", 0, 7]}},
+            "out": {"$sum": {"$cond": [{"$eq": ["$direction", "IN"]}, 0, "$qty"]}},
+            "in_qty": {"$sum": {"$cond": [{"$eq": ["$direction", "IN"]}, "$qty", 0]}},
+            "first_in": {"$min": {"$cond": [{"$eq": ["$direction", "IN"]}, "$date", None]}},
+            "max_date": {"$max": "$date"},
+        }},
+        {"$group": {
+            "_id": "$_id.code",
+            "months": {"$push": {"month": "$_id.month", "out": "$out"}},
+            "total_out": {"$sum": "$out"},
+            "total_in": {"$sum": "$in_qty"},
+            "first_in": {"$min": "$first_in"},
+            "last_txn": {"$max": "$max_date"},
+        }},
+    ]
+    return pipeline
+
+
+def build_analysis_row(d: dict, item: dict, settings: dict):
+    monthly_out = {m["month"]: m["out"] for m in d.get("months", []) if m.get("out")}
+    stats = compute_item_stats(d.get("first_in"), monthly_out, item.get("criticality"), settings, item.get("current_qty", 0))
+    return {
+        "item_code": d["_id"],
+        "description": item.get("description", ""),
+        "uom": item.get("uom", ""),
+        "item_type": item.get("item_type", "Other"),
+        "current_qty": item.get("current_qty", 0),
+        "min_qty": item.get("min_qty", 0),
+        "max_qty": item.get("max_qty", 0),
+        "status": item.get("status", ""),
+        "total_in": d.get("total_in", 0),
+        "total_out": d.get("total_out", 0),
+        "total_consumption": stats["cumulative_consumption"],
+        "avg_monthly_consumption": stats["avg_monthly_consumption"],
+        "first_receipt_date": d.get("first_in"),
+        "last_transaction_date": d.get("last_txn"),
+        "stats": stats,
+        "recommendation": {**stats, "current_min": item.get("min_qty", 0), "current_max": item.get("max_qty", 0)},
+    }
+
+
 @api_router.get("/analysis")
 async def consumption_analysis(
     page: int = Query(1, ge=1),
@@ -685,20 +822,10 @@ async def consumption_analysis(
     sort_dir: str = "desc",
 ):
     settings = await get_settings_doc()
-    match_stage = {}
-    if search:
-        match_stage = {"$or": [
-            {"item_code": {"$regex": search, "$options": "i"}},
-            {"item_description": {"$regex": search, "$options": "i"}},
-        ]}
-    pipeline = []
-    if match_stage:
-        pipeline.append({"$match": match_stage})
-    pipeline.append({"$group": dict(CONSUMPTION_GROUP)})
-    pipeline.append({"$addFields": {"consumption": {"$max": [0, {"$subtract": ["$total_out", "$wo_returns"]}]}}})
+    pipeline = analysis_group_pipeline(search)
     if with_consumption_only:
-        pipeline.append({"$match": {"consumption": {"$gt": 0}}})
-    sort_field = {"consumption": "consumption", "total_out": "total_out", "last_txn": "last_txn", "item_code": "_id"}.get(sort_by, "consumption")
+        pipeline.append({"$match": {"total_out": {"$gt": 0}}})
+    sort_field = {"consumption": "total_out", "total_out": "total_out", "last_txn": "last_txn", "item_code": "_id"}.get(sort_by, "total_out")
     pipeline.append({"$sort": {sort_field: DESCENDING if sort_dir == "desc" else ASCENDING}})
     pipeline.append({"$facet": {
         "data": [{"$skip": (page - 1) * page_size}, {"$limit": page_size}],
@@ -714,34 +841,10 @@ async def consumption_analysis(
         async for it in db.items.find({"item_code": {"$in": codes}}, {"_id": 0}):
             items_map[it["item_code"]] = it
 
-    rows = []
-    for d in data:
-        code = d["_id"]
-        item = items_map.get(code, {})
-        consumption = d.get("consumption", 0)
-        first_out = d.get("first_out")
-        avg_monthly = consumption / months_between(first_out) if (consumption > 0 and first_out) else 0.0
-        rec = build_recommendation(avg_monthly, settings, item.get("min_qty", 0), item.get("max_qty", 0))
-        rows.append({
-            "item_code": code,
-            "description": item.get("description", d.get("item_description", "")),
-            "uom": item.get("uom", ""),
-            "item_type": item.get("item_type", "Other"),
-            "current_qty": item.get("current_qty", 0),
-            "min_qty": item.get("min_qty", 0),
-            "max_qty": item.get("max_qty", 0),
-            "status": item.get("status", ""),
-            "total_in": d.get("total_in", 0),
-            "total_out": d.get("total_out", 0),
-            "wo_returns": d.get("wo_returns", 0),
-            "total_consumption": consumption,
-            "avg_monthly_consumption": round(avg_monthly, 2),
-            "first_receipt_date": d.get("first_receipt"),
-            "last_transaction_date": d.get("last_txn"),
-            "recommendation": rec,
-        })
+    rows = [build_analysis_row(d, items_map.get(d["_id"], {}), settings) for d in data]
     return {"rows": rows, "total": total, "page": page, "page_size": page_size,
-            "total_pages": max(1, math.ceil(total / page_size)), "settings": settings}
+            "total_pages": max(1, math.ceil(total / page_size)), "settings": settings,
+            "report_review_date": today_str()}
 
 
 # ---------------------------- Non-Moving ----------------------------
@@ -901,33 +1004,43 @@ async def export_top20():
 @api_router.get("/export/analysis")
 async def export_analysis():
     settings = await get_settings_doc()
-    pipeline = [{"$group": dict(CONSUMPTION_GROUP)},
-                {"$addFields": {"consumption": {"$max": [0, {"$subtract": ["$total_out", "$wo_returns"]}]}}},
-                {"$sort": {"consumption": -1}}]
+    pipeline = analysis_group_pipeline() + [{"$sort": {"total_out": -1}}]
     data = await db.transactions.aggregate(pipeline).to_list(100000)
     codes = [d["_id"] for d in data]
     items_map = {}
     if codes:
         async for it in db.items.find({"item_code": {"$in": codes}}, {"_id": 0}):
             items_map[it["item_code"]] = it
+    review_date = today_str()
     rows = []
     for d in data:
         item = items_map.get(d["_id"], {})
-        consumption = d.get("consumption", 0)
-        first_out = d.get("first_out")
-        avg_monthly = consumption / months_between(first_out) if (consumption > 0 and first_out) else 0.0
-        rec = build_recommendation(avg_monthly, settings, item.get("min_qty", 0), item.get("max_qty", 0))
+        r = build_analysis_row(d, item, settings)
+        s = r["stats"]
         rows.append({
-            "Item Code": d["_id"], "Item Description": item.get("description", ""),
-            "Current Stock": item.get("current_qty", 0), "Total IN": d.get("total_in", 0),
-            "Total OUT": d.get("total_out", 0), "WO Returns": d.get("wo_returns", 0),
-            "Total Consumption": consumption, "Avg Monthly Consumption": round(avg_monthly, 2),
-            "First Receipt": d.get("first_receipt"), "Last Transaction": d.get("last_txn"),
+            "Item Code": r["item_code"], "Item Description": r["description"], "UOM": r["uom"],
+            "Current Stock": r["current_qty"],
+            "Criticality": f"{s['criticality']} - {s['criticality_label']}",
+            "Service Level %": s["service_level"], "Z-Value": s["z_value"],
+            "First IN Date": s["first_in_date"], "Report Review Date": review_date,
+            "Months History": s["months_history"],
+            "Cumulative Consumption": s["cumulative_consumption"],
+            "Avg Monthly Consumption": s["avg_monthly_consumption"],
+            "Avg Yearly Consumption": s["avg_yearly_consumption"],
+            "Consumption Std Dev": s["consumption_std_dev"],
+            "Lead-Time Demand": s["lead_time_demand"],
+            "Safety Stock": s["safety_stock"],
+            "Recommended Minimum (ROP)": s["recommended_min"],
+            "Six-Month Demand": s["six_month_demand"],
+            "Recommended Maximum": s["recommended_max"],
+            "Stock Status": s["stock_status"],
+            "Confidence": s["confidence"],
+            "Confidence Notes": "; ".join(s["confidence_reasons"]),
             "Current Min": item.get("min_qty", 0), "Current Max": item.get("max_qty", 0),
-            "Recommended Min": rec["recommended_min"], "Recommended Max": rec["recommended_max"],
         })
     df = pd.DataFrame(rows)
-    return df_to_excel_response(df, "Consumption Analysis", "consumption_analysis.xlsx")
+    return df_to_excel_response(df, "Consumption Analysis", "consumption_analysis.xlsx",
+                                title=f"Consumption & Recommended Min-Max Report - Reviewed {review_date}")
 
 
 # ---------------------------- Bulk Type Update ----------------------------
@@ -1063,7 +1176,7 @@ async def month_movement_stats(ym: str):
     for d in data:
         it = items_map.get(d["_id"], {})
         price = it.get("unit_price", 0) or 0
-        cons = max(0, (d["out_qty"] or 0) - (d["wo_ret"] or 0))
+        cons = d["out_qty"] or 0  # consumption = OUT only (per spec)
         cons_val = round(cons * price, 2)
         totals["consumption_qty"] += cons
         totals["consumption_value"] += cons_val

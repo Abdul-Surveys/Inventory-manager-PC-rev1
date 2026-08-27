@@ -16,7 +16,7 @@ import { formatUSD2, formatUSD, formatNumber, ITEM_TYPES, STATUS_META } from "@/
 import { toast } from "sonner";
 import { Search, Download, Plus, ArrowUpDown, Tags, X } from "lucide-react";
 
-const EMPTY_ITEM = { item_code: "", description: "", uom: "PCS", item_type: "Other", min_qty: 0, max_qty: 0, current_qty: 0, unit_price: 0 };
+const EMPTY_ITEM = { item_code: "", description: "", uom: "PCS", item_type: "Other", criticality: "3", min_qty: 0, max_qty: 0, current_qty: 0, unit_price: 0 };
 
 export default function Inventory() {
   const [searchParams] = useSearchParams();
@@ -98,6 +98,7 @@ export default function Inventory() {
     try {
       await api.post("/items", {
         ...newItem,
+        criticality: Number(newItem.criticality),
         min_qty: Number(newItem.min_qty), max_qty: Number(newItem.max_qty),
         current_qty: Number(newItem.current_qty), unit_price: Number(newItem.unit_price),
       });
@@ -222,6 +223,17 @@ export default function Inventory() {
                   <Select value={newItem.item_type} onValueChange={(v) => setNewItem({ ...newItem, item_type: v })}>
                     <SelectTrigger data-testid="add-item-type-select"><SelectValue /></SelectTrigger>
                     <SelectContent>{ITEM_TYPES.map((t) => <SelectItem key={t} value={t}>{t}</SelectItem>)}</SelectContent>
+                  </Select>
+                </div>
+                <div>
+                  <Label className="text-xs">Criticality</Label>
+                  <Select value={newItem.criticality} onValueChange={(v) => setNewItem({ ...newItem, criticality: v })}>
+                    <SelectTrigger data-testid="add-item-criticality-select"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="1">1 — Critical Spare</SelectItem>
+                      <SelectItem value="2">2 — Important Operational</SelectItem>
+                      <SelectItem value="3">3 — Normal / Non-Critical</SelectItem>
+                    </SelectContent>
                   </Select>
                 </div>
                 <div>

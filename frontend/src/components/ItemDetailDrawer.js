@@ -8,9 +8,9 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Separator } from "@/components/ui/separator";
 import { StatusChip } from "@/components/StatusChip";
 import { api, getErrorMessage } from "@/lib/api";
-import { formatUSD2, formatUSD, formatNumber, formatDate, ITEM_TYPES } from "@/lib/format";
+import { formatUSD2, formatUSD, formatNumber, formatDate, ITEM_TYPES, CRITICALITY_META } from "@/lib/format";
 import { toast } from "sonner";
-import { Pencil, Check, X, Wand2 } from "lucide-react";
+import { Pencil, Check, X, Wand2, AlertTriangle } from "lucide-react";
 import {
   ResponsiveContainer, ComposedChart, Bar, Line, XAxis, YAxis, Tooltip as ReTooltip, CartesianGrid, Legend,
 } from "recharts";
@@ -38,6 +38,7 @@ export const ItemDetailDrawer = ({ itemCode, open, onOpenChange, onChanged }) =>
       setData(res.data);
       setForm({
         item_type: res.data.item.item_type || "Other",
+        criticality: String(res.data.stats.criticality || 3),
         min_qty: res.data.item.min_qty,
         max_qty: res.data.item.max_qty,
         unit_price: res.data.item.unit_price,
@@ -63,6 +64,7 @@ export const ItemDetailDrawer = ({ itemCode, open, onOpenChange, onChanged }) =>
     try {
       await api.put(`/items/${encodeURIComponent(itemCode)}`, {
         item_type: form.item_type,
+        criticality: Number(form.criticality),
         min_qty: Number(form.min_qty),
         max_qty: Number(form.max_qty),
         unit_price: Number(form.unit_price),
@@ -81,15 +83,15 @@ export const ItemDetailDrawer = ({ itemCode, open, onOpenChange, onChanged }) =>
   };
 
   const applyRecommendation = async () => {
-    const rec = data?.recommendation;
-    if (!rec) return;
+    const s = data?.stats;
+    if (!s) return;
     setApplying(true);
     try {
       await api.post(`/items/${encodeURIComponent(itemCode)}/apply-recommendation`, {
-        min_qty: rec.recommended_min,
-        max_qty: rec.recommended_max,
+        min_qty: s.recommended_min,
+        max_qty: s.recommended_max,
       });
-      toast.success(`Applied: Min ${rec.recommended_min} / Max ${rec.recommended_max}`);
+      toast.success(`Applied: Min ${s.recommended_min} / Max ${s.recommended_max}`);
       await load();
       onChanged && onChanged();
     } catch (e) {
@@ -100,7 +102,8 @@ export const ItemDetailDrawer = ({ itemCode, open, onOpenChange, onChanged }) =>
   };
 
   const item = data?.item;
-  const rec = data?.recommendation;
+  const s = data?.stats;
+  const critMeta = s ? (CRITICALITY_META[s.criticality] || CRITICALITY_META[3]) : null;
 
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
@@ -124,7 +127,7 @@ export const ItemDetailDrawer = ({ itemCode, open, onOpenChange, onChanged }) =>
                 {item.description}
               </SheetDescription>
               <p className="text-xs text-muted-foreground">
-                {item.uom} · {item.item_type || "Other"} {item.criticality ? `· Criticality ${item.criticality}` : ""}
+                {item.uom} · {item.item_type || "Other"} · Criticality {s.criticality} — {s.criticality_label}
               </p>
             </SheetHeader>
 
@@ -172,8 +175,23 @@ export const ItemDetailDrawer = ({ itemCode, open, onOpenChange, onChanged }) =>
                     </Select>
                   </div>
                   <div>
+                    <Label className="text-xs">Criticality</Label>
+                    <Select value={form.criticality} onValueChange={(v) => setForm({ ...form, criticality: v })}>
+                      <SelectTrigger data-testid="item-edit-criticality-select"><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        {Object.entries(CRITICALITY_META).map(([k, m]) => (
+                          <SelectItem key={k} value={k}>{k} — {m.label} ({m.serviceLevel}% SL)</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div>
                     <Label className="text-xs">UOM</Label>
                     <Input data-testid="item-edit-uom" value={form.uom} onChange={(e) => setForm({ ...form, uom: e.target.value })} />
+                  </div>
+                  <div>
+                    <Label className="text-xs">Unit Rate (USD)</Label>
+                    <Input data-testid="item-edit-price" type="number" step="0.01" value={form.unit_price} onChange={(e) => setForm({ ...form, unit_price: e.target.value })} />
                   </div>
                   <div>
                     <Label className="text-xs">Minimum Stock</Label>
@@ -183,30 +201,29 @@ export const ItemDetailDrawer = ({ itemCode, open, onOpenChange, onChanged }) =>
                     <Label className="text-xs">Maximum Stock</Label>
                     <Input data-testid="item-edit-max" type="number" value={form.max_qty} onChange={(e) => setForm({ ...form, max_qty: e.target.value })} />
                   </div>
-                  <div>
-                    <Label className="text-xs">Unit Rate (USD)</Label>
-                    <Input data-testid="item-edit-price" type="number" step="0.01" value={form.unit_price} onChange={(e) => setForm({ ...form, unit_price: e.target.value })} />
-                  </div>
                 </div>
               )}
             </div>
 
             <Separator className="my-5" />
 
-            {/* Consumption metrics */}
-            <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Consumption Analysis</p>
+            {/* Consumption metrics per spec */}
+            <div className="flex items-center justify-between">
+              <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Consumption Analysis</p>
+              <p className="text-[11px] text-muted-foreground">Review date: {formatDate(s.report_review_date)}</p>
+            </div>
             <div className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-3">
-              <Metric label="Total Consumption" value={formatNumber(data.total_consumption)} testId="item-detail-total-consumption" />
-              <Metric label="Avg Monthly" value={formatNumber(data.avg_monthly_consumption)} testId="item-detail-avg-monthly" />
-              <Metric label="Total IN" value={formatNumber(data.total_in)} testId="item-detail-total-in" />
-              <Metric label="Total OUT" value={formatNumber(data.total_out)} testId="item-detail-total-out" />
-              <Metric label="WO Returns" value={formatNumber(data.wo_returns)} testId="item-detail-wo-returns" />
-              <Metric label="First Receipt" value={formatDate(data.first_receipt_date)} testId="item-detail-first-receipt" />
+              <Metric label="First IN Date" value={formatDate(s.first_in_date)} testId="item-detail-first-receipt" />
+              <Metric label="Months History" value={formatNumber(s.months_history)} testId="item-detail-months-history" />
+              <Metric label="Cumulative Consumption" value={formatNumber(s.cumulative_consumption)} testId="item-detail-total-consumption" />
+              <Metric label="Avg Monthly" value={formatNumber(s.avg_monthly_consumption)} testId="item-detail-avg-monthly" />
+              <Metric label="Avg Yearly" value={formatNumber(s.avg_yearly_consumption)} testId="item-detail-avg-yearly" />
+              <Metric label="Monthly Std Dev" value={formatNumber(s.consumption_std_dev)} testId="item-detail-std-dev" />
             </div>
 
             {data.monthly?.length > 0 && (
               <div data-testid="item-detail-consumption-chart" className="mt-4 rounded-lg border p-3">
-                <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Consumption Trend (monthly)</p>
+                <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Consumption Trend (monthly, zero months included)</p>
                 <ResponsiveContainer width="100%" height={220}>
                   <ComposedChart data={data.monthly} margin={{ top: 5, right: 10, bottom: 0, left: -15 }}>
                     <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
@@ -214,39 +231,55 @@ export const ItemDetailDrawer = ({ itemCode, open, onOpenChange, onChanged }) =>
                     <YAxis tick={{ fontSize: 10 }} allowDecimals={false} />
                     <ReTooltip contentStyle={{ fontSize: 12, borderRadius: 8 }} />
                     <Legend wrapperStyle={{ fontSize: 11 }} />
-                    <Bar name="Consumption" dataKey="consumption" fill="hsl(var(--chart-1))" radius={[3, 3, 0, 0]} maxBarSize={28} />
+                    <Bar name="Consumption (OUT)" dataKey="consumption" fill="hsl(var(--chart-1))" radius={[3, 3, 0, 0]} maxBarSize={28} />
                     <Line name="Cumulative" type="monotone" dataKey="cumulative_consumption" stroke="hsl(var(--chart-2))" strokeWidth={2} dot={false} />
                   </ComposedChart>
                 </ResponsiveContainer>
               </div>
             )}
 
-            {/* Recommendation */}
-            {rec && (
-              <div data-testid="item-detail-recommendation" className="mt-4 rounded-lg border bg-primary/5 p-4">
-                <div className="flex items-center justify-between gap-2">
-                  <p className="text-xs font-semibold uppercase tracking-wide text-primary">Min/Max Recommendation</p>
-                  <Button
-                    data-testid="item-detail-apply-recommendation"
-                    size="sm"
-                    onClick={applyRecommendation}
-                    disabled={applying || rec.recommended_min === 0}
-                  >
-                    <Wand2 className="mr-1.5 h-3.5 w-3.5" /> {applying ? "Applying..." : "Apply"}
-                  </Button>
+            {/* Recommendation per spec */}
+            <div data-testid="item-detail-recommendation" className="mt-4 rounded-lg border bg-primary/5 p-4">
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-primary">Recommended Min / Max</p>
+                  <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-semibold ${
+                    s.stock_status === "REORDER"
+                      ? "bg-[hsl(var(--status-below-min)/0.12)] text-[hsl(var(--status-below-min))]"
+                      : "bg-[hsl(var(--status-ok)/0.1)] text-[hsl(var(--status-ok))]"
+                  }`} data-testid="item-detail-reorder-status">{s.stock_status}</span>
                 </div>
-                <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-4">
-                  <Metric label="Current Min" value={formatNumber(rec.current_min)} />
-                  <Metric label="Recommended Min" value={formatNumber(rec.recommended_min)} testId="item-detail-rec-min" />
-                  <Metric label="Current Max" value={formatNumber(rec.current_max)} />
-                  <Metric label="Recommended Max" value={formatNumber(rec.recommended_max)} testId="item-detail-rec-max" />
-                </div>
-                <p className="mt-2 text-[11px] text-muted-foreground">
-                  Based on avg monthly consumption {formatNumber(rec.avg_monthly_consumption)} × lead time {data.settings.lead_time_months} mo + safety stock {formatNumber(rec.safety_stock)} ({data.settings.safety_months} mo); coverage {data.settings.coverage_months} mo.
-                  {rec.recommended_min === 0 ? " No consumption history yet — recommendation unavailable." : ""}
-                </p>
+                <Button
+                  data-testid="item-detail-apply-recommendation"
+                  size="sm"
+                  onClick={applyRecommendation}
+                  disabled={applying || s.recommended_min === 0}
+                >
+                  <Wand2 className="mr-1.5 h-3.5 w-3.5" /> {applying ? "Applying..." : "Apply"}
+                </Button>
               </div>
-            )}
+              <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-4">
+                <Metric label="Service Level" value={`${s.service_level}%`} testId="item-detail-service-level" />
+                <Metric label="Z-Value" value={s.z_value} testId="item-detail-z-value" />
+                <Metric label="Lead-Time Demand" value={formatNumber(s.lead_time_demand)} testId="item-detail-lt-demand" />
+                <Metric label="Safety Stock" value={formatNumber(s.safety_stock)} testId="item-detail-safety-stock" />
+                <Metric label="Current Min" value={formatNumber(item.min_qty)} />
+                <Metric label="Recommended Min (ROP)" value={formatNumber(s.recommended_min)} testId="item-detail-rec-min" />
+                <Metric label="Current Max" value={formatNumber(item.max_qty)} />
+                <Metric label="Recommended Max" value={formatNumber(s.recommended_max)} testId="item-detail-rec-max" />
+              </div>
+              <p className="mt-2 text-[11px] text-muted-foreground">
+                Criticality {s.criticality} ({critMeta.label}) → {s.service_level}% service level, Z = {s.z_value}. Safety Stock = Z × Std Dev × √{s.lead_time_months} = {formatNumber(s.safety_stock)}. Rec. Min = Lead-Time Demand ({formatNumber(s.lead_time_demand)}) + Safety Stock. Rec. Max = {s.max_demand_months}-month demand ({formatNumber(s.six_month_demand)}) + Safety Stock.
+              </p>
+              {s.confidence === "LOW" && (
+                <div data-testid="item-detail-low-confidence" className="mt-2 flex items-start gap-2 rounded-md border border-[hsl(var(--status-minimum)/0.35)] bg-[hsl(var(--status-minimum)/0.08)] p-2">
+                  <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-[hsl(var(--status-minimum))]" />
+                  <p className="text-xs text-foreground">
+                    <span className="font-semibold">Lower-confidence recommendation:</span> {s.confidence_reasons.join("; ")}. The normal-distribution model may not represent intermittent or low-history items well — review manually before applying.
+                  </p>
+                </div>
+              )}
+            </div>
 
             {/* Recent transactions */}
             {data.recent_transactions?.length > 0 && (

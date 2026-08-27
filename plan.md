@@ -149,3 +149,9 @@ Core = “Import Items → Create Transactions → Current Stock & Status update
 - DONE: Monthly Snapshot Report (/reports + /api/reports/monthly-snapshot + export), Reorder Proposals (/reorder + /api/reorder + export), Bulk Type Editing (inventory multi-select + select-all-matching + /api/items/bulk-type), Transaction Bulk Import (/api/import/transactions + template + apply-to-stock option, UI on Import/Export page), PetroChina logo in sidebar + embedded in all Excel report headers.
 - Testing: iteration_2 = backend 49/50 (1 expected-behavior note), frontend 100%; bulk-apply UI verified manually on safe item 15999 (restored).
 - User data preserved: user's own transactions on item 1001 and manual type edits untouched.
+
+## STATUS Phase 4 (complete) - Statistical Min/Max Spec Rewrite
+- Implemented user's formal specification: consumption = OUT only; calendar-month window from First IN Date (zero months included); STDEV.S monthly series; criticality 1/2/3 -> service level 80/80/50% & Z 0.842/0.842/0; Lead Time 3mo; SS = Z*sd*sqrt(3); RecMin=LTdemand+SS; RecMax=6mo demand+SS; REORDER/OK status; low-confidence flags (<6mo history, no consumption, >66% zero months).
+- Settings migrated: lead_time_months=3, max_demand_months=6, non_moving_months=12 (coverage/safety removed). Criticality normalized to int 1/2/3 across 15k items (default 3); editable in drawer + add-item dialog.
+- Analysis page/export rebuilt to spec output columns incl Report Review Date. Snapshot consumption also OUT-only.
+- Testing: iteration_2 (2nd run) = backend 49/49 math-validated, frontend 100%. SPECTEST1 cleaned up.

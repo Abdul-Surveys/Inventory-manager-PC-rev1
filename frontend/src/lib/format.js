@@ -42,3 +42,24 @@ export const STATUS_META = {
 
 export const ITEM_TYPES = ["Spare Parts", "Consumables", "Chemicals", "Other"];
 export const TXN_TYPES = ["Purchase Order", "Work Order", "Return from Work Order", "Return Other", "Opening Balance", "Adjustment"];
+
+export const CRITICALITY_META = {
+  1: {
+    label: "Critical Spare",
+    serviceLevel: 80,
+    z: 0.842,
+    chip: "bg-[hsl(var(--status-below-min)/0.12)] text-[hsl(var(--status-below-min))]",
+  },
+  2: {
+    label: "Important Operational",
+    serviceLevel: 80,
+    z: 0.842,
+    chip: "bg-[hsl(var(--status-minimum)/0.14)] text-[hsl(var(--status-minimum))]",
+  },
+  3: {
+    label: "Normal / Non-Critical",
+    serviceLevel: 50,
+    z: 0.0,
+    chip: "bg-muted text-muted-foreground",
+  },
+};

@@ -41,7 +41,7 @@ DEFAULT_SETTINGS = {"lead_time_months": 3, "max_demand_months": 6, "non_moving_m
 
 # Criticality -> (Service Level %, Z-value of standard normal quantile)
 Z_TABLE = {1: (80, 0.842), 2: (80, 0.842), 3: (50, 0.0)}
-CRITICALITY_LABELS = {1: "Critical Spare", 2: "Important Operational", 3: "Normal / Non-Critical"}
+CRITICALITY_LABELS = {1: "Operations & Maintenance Critical Spares", 2: "Medium Critical Spares", 3: "Normal / Non-Critical"}
 
 
 # ---------------------------- Helpers ----------------------------
@@ -309,6 +309,7 @@ async def list_items(
     page_size: int = Query(50, ge=1, le=200),
     search: Optional[str] = None,
     item_type: Optional[str] = None,
+    criticality: Optional[str] = None,
     status: Optional[str] = None,
     sort_by: str = "item_code",
     sort_dir: str = "asc",
@@ -321,6 +322,11 @@ async def list_items(
         ]
     if item_type and item_type != "all":
         q["item_type"] = item_type
+    if criticality and criticality != "all":
+        try:
+            q["criticality"] = int(criticality)
+        except (ValueError, TypeError):
+            pass
     if status and status != "all":
         q["status"] = status
     allowed_sort = {"item_code", "description", "current_qty", "min_qty", "max_qty", "unit_price", "total_value", "status", "item_type"}
@@ -1130,6 +1136,11 @@ async def bulk_update_type(payload: BulkTypeUpdate):
             ]
         if f.get("item_type") and f["item_type"] != "all":
             q["item_type"] = f["item_type"]
+        if f.get("criticality") and f["criticality"] != "all":
+            try:
+                q["criticality"] = int(f["criticality"])
+            except (ValueError, TypeError):
+                pass
         if f.get("status") and f["status"] != "all":
             q["status"] = f["status"]
     if q is None:

@@ -12,9 +12,25 @@ import { Paginator } from "@/components/Paginator";
 import { ItemDetailDrawer } from "@/components/ItemDetailDrawer";
 import { Checkbox } from "@/components/ui/checkbox";
 import { api, downloadReport, getErrorMessage } from "@/lib/api";
-import { formatUSD2, formatUSD, formatNumber, ITEM_TYPES, STATUS_META } from "@/lib/format";
+import { formatUSD2, formatUSD, formatNumber, ITEM_TYPES, STATUS_META, CRITICALITY_META } from "@/lib/format";
 import { toast } from "sonner";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { Search, Download, Plus, ArrowUpDown, Tags, X } from "lucide-react";
+
+const CritBadge = ({ value }) => {
+  const v = Number(value) || 3;
+  const meta = CRITICALITY_META[v] || CRITICALITY_META[3];
+  return (
+    <TooltipProvider delayDuration={200}>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <span className={`inline-flex h-6 w-6 items-center justify-center rounded-full text-xs font-bold ${meta.chip}`}>{v}</span>
+        </TooltipTrigger>
+        <TooltipContent className="text-xs">{v} — {meta.label}</TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  );
+};
 
 const EMPTY_ITEM = { item_code: "", description: "", uom: "PCS", item_type: "Other", criticality: "3", min_qty: 0, max_qty: 0, current_qty: 0, unit_price: 0 };
 
@@ -27,6 +43,7 @@ export default function Inventory() {
   const [pageSize] = useState(50);
   const [search, setSearch] = useState("");
   const [itemType, setItemType] = useState("all");
+  const [criticality, setCriticality] = useState("all");
   const [status, setStatus] = useState(searchParams.get("status") || "all");
   const [sortBy, setSortBy] = useState("item_code");
   const [sortDir, setSortDir] = useState("asc");
@@ -51,6 +68,7 @@ export default function Inventory() {
           page_size: pageSize,
           search: (opts.search ?? search) || undefined,
           item_type: opts.itemType ?? itemType,
+          criticality: opts.criticality ?? criticality,
           status: opts.status ?? status,
           sort_by: opts.sortBy ?? sortBy,
           sort_dir: opts.sortDir ?? sortDir,
@@ -64,12 +82,12 @@ export default function Inventory() {
     } finally {
       setLoading(false);
     }
-  }, [page, pageSize, search, itemType, status, sortBy, sortDir]);
+  }, [page, pageSize, search, itemType, criticality, status, sortBy, sortDir]);
 
   useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [page, itemType, status, sortBy, sortDir]);
+  }, [page, itemType, criticality, status, sortBy, sortDir]);
 
   const onSearchChange = (v) => {
     setSearch(v);
@@ -154,7 +172,7 @@ export default function Inventory() {
     setApplyingBulk(true);
     try {
       const payload = selectAllMatching
-        ? { new_type: bulkType, select_filter: { search: search || undefined, item_type: itemType, status } }
+        ? { new_type: bulkType, select_filter: { search: search || undefined, item_type: itemType, criticality, status } }
         : { new_type: bulkType, item_codes: Array.from(selected) };
       const res = await api.post("/items/bulk-type", payload);
       toast.success(`${formatNumber(res.data.modified)} item${res.data.modified === 1 ? "" : "s"} set to "${bulkType}"`);
@@ -187,6 +205,15 @@ export default function Inventory() {
             <SelectContent>
               <SelectItem value="all">All Types</SelectItem>
               {ITEM_TYPES.map((t) => <SelectItem key={t} value={t}>{t}</SelectItem>)}
+            </SelectContent>
+          </Select>
+          <Select value={criticality} onValueChange={(v) => { setCriticality(v); setPage(1); }}>
+            <SelectTrigger data-testid="inventory-criticality-filter" className="w-[180px]"><SelectValue placeholder="Criticality" /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All Criticality</SelectItem>
+              {Object.entries(CRITICALITY_META).map(([k, m]) => (
+                <SelectItem key={k} value={k}>{k} — {m.label}</SelectItem>
+              ))}
             </SelectContent>
           </Select>
           <Select value={status} onValueChange={(v) => { setStatus(v); setPage(1); }}>
@@ -230,8 +257,8 @@ export default function Inventory() {
                   <Select value={newItem.criticality} onValueChange={(v) => setNewItem({ ...newItem, criticality: v })}>
                     <SelectTrigger data-testid="add-item-criticality-select"><SelectValue /></SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="1">1 — Critical Spare</SelectItem>
-                      <SelectItem value="2">2 — Important Operational</SelectItem>
+                      <SelectItem value="1">1 — Operations &amp; Maintenance Critical Spares</SelectItem>
+                      <SelectItem value="2">2 — Medium Critical Spares</SelectItem>
                       <SelectItem value="3">3 — Normal / Non-Critical</SelectItem>
                     </SelectContent>
                   </Select>
@@ -300,6 +327,7 @@ export default function Inventory() {
                   <th className="px-3 py-2">Description</th>
                   <th className="px-3 py-2">UOM</th>
                   <th className="px-3 py-2">Type</th>
+                  <th className="px-3 py-2">Crit</th>
                   <SortableHead field="min_qty" className="text-right">Min</SortableHead>
                   <SortableHead field="max_qty" className="text-right">Max</SortableHead>
                   <SortableHead field="current_qty" className="text-right">Current</SortableHead>
@@ -311,10 +339,10 @@ export default function Inventory() {
               <tbody>
                 {loading ? (
                   [...Array(10)].map((_, i) => (
-                    <tr key={i} className="border-b"><td colSpan={11} className="px-3 py-2"><Skeleton className="h-6 w-full" /></td></tr>
+                    <tr key={i} className="border-b"><td colSpan={12} className="px-3 py-2"><Skeleton className="h-6 w-full" /></td></tr>
                   ))
                 ) : items.length === 0 ? (
-                  <tr><td colSpan={11} className="px-3 py-10 text-center text-sm text-muted-foreground">No items match your filters.</td></tr>
+                  <tr><td colSpan={12} className="px-3 py-10 text-center text-sm text-muted-foreground">No items match your filters.</td></tr>
                 ) : (
                   items.map((it) => (
                     <tr
@@ -335,6 +363,7 @@ export default function Inventory() {
                       <td className="px-3 py-2 max-w-[300px] truncate">{it.description}</td>
                       <td className="px-3 py-2 text-xs">{it.uom}</td>
                       <td className="px-3 py-2 text-xs">{it.item_type || "Other"}</td>
+                      <td className="px-3 py-2"><CritBadge value={it.criticality} /></td>
                       <td className="px-3 py-2 text-right tabular-nums">{formatNumber(it.min_qty)}</td>
                       <td className="px-3 py-2 text-right tabular-nums">{formatNumber(it.max_qty)}</td>
                       <td className="px-3 py-2 text-right font-medium tabular-nums">{formatNumber(it.current_qty)}</td>

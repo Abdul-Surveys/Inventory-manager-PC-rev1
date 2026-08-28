@@ -141,6 +141,7 @@ export default function Analysis() {
                   <th className="px-3 py-2 text-right">Current</th>
                   <th className="px-3 py-2 text-right">Cum. Cons</th>
                   <th className="px-3 py-2 text-right">Avg / Mo</th>
+                  <th className="px-3 py-2 text-right">Avg / Yr</th>
                   <th className="px-3 py-2 text-right">Std Dev</th>
                   <th className="px-3 py-2 text-right">Safety Stk</th>
                   <th className="px-3 py-2 text-right">Min (Cur → Rec)</th>
@@ -152,10 +153,10 @@ export default function Analysis() {
               <tbody>
                 {loading ? (
                   [...Array(8)].map((_, i) => (
-                    <tr key={i} className="border-b"><td colSpan={12} className="px-3 py-2"><Skeleton className="h-6 w-full" /></td></tr>
+                    <tr key={i} className="border-b"><td colSpan={13} className="px-3 py-2"><Skeleton className="h-6 w-full" /></td></tr>
                   ))
                 ) : rows.length === 0 ? (
-                  <tr><td colSpan={12} className="px-3 py-10 text-center text-sm text-muted-foreground">
+                  <tr><td colSpan={13} className="px-3 py-10 text-center text-sm text-muted-foreground">
                     {withConsumptionOnly ? "No items with consumption yet. Record OUT transactions to see analysis." : "No transaction data yet."}
                   </td></tr>
                 ) : (
@@ -176,6 +177,7 @@ export default function Analysis() {
                         <td className="px-3 py-2 text-right tabular-nums">{formatNumber(r.current_qty)}</td>
                         <td className="px-3 py-2 text-right font-medium tabular-nums">{formatNumber(s.cumulative_consumption)}</td>
                         <td className="px-3 py-2 text-right tabular-nums">{formatNumber(s.avg_monthly_consumption)}</td>
+                        <td className="px-3 py-2 text-right tabular-nums">{formatNumber(s.avg_yearly_consumption)}</td>
                         <td className="px-3 py-2 text-right tabular-nums">{formatNumber(s.consumption_std_dev)}</td>
                         <td className="px-3 py-2 text-right tabular-nums">{formatNumber(s.safety_stock)}</td>
                         <td className="px-3 py-2 text-right tabular-nums">

@@ -45,13 +45,13 @@ export const TXN_TYPES = ["Purchase Order", "Work Order", "Return from Work Orde
 
 export const CRITICALITY_META = {
   1: {
-    label: "Critical Spare",
+    label: "Operations & Maintenance Critical Spares",
     serviceLevel: 80,
     z: 0.842,
     chip: "bg-[hsl(var(--status-below-min)/0.12)] text-[hsl(var(--status-below-min))]",
   },
   2: {
-    label: "Important Operational",
+    label: "Medium Critical Spares",
     serviceLevel: 80,
     z: 0.842,
     chip: "bg-[hsl(var(--status-minimum)/0.14)] text-[hsl(var(--status-minimum))]",

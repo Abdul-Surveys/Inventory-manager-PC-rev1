@@ -1,46 +1,18 @@
 [
   {
-    "content": "Backend: monthly snapshot report API + export",
+    "content": "Update criticality descriptions (1=Operations & maintenance critical spares, 2=Medium critical spares, 3=Normal/Non-critical)",
     "status": "completed"
   },
   {
-    "content": "Backend: reorder suggestions API + export",
+    "content": "Add avg monthly/yearly consumption columns in Consumption/Analysis tab",
     "status": "completed"
   },
   {
-    "content": "Backend: bulk item type update API",
+    "content": "Add criticality column + filter in Inventory tab (frontend + backend)",
     "status": "completed"
   },
   {
-    "content": "Backend: transaction bulk import API + template download",
-    "status": "completed"
-  },
-  {
-    "content": "Backend: logo header in all Excel exports",
-    "status": "completed"
-  },
-  {
-    "content": "Frontend: logo in sidebar/header",
-    "status": "completed"
-  },
-  {
-    "content": "Frontend: Monthly Report page",
-    "status": "completed"
-  },
-  {
-    "content": "Frontend: Reorder Proposals page",
-    "status": "completed"
-  },
-  {
-    "content": "Frontend: Inventory bulk selection + Set Type action",
-    "status": "completed"
-  },
-  {
-    "content": "Frontend: Transaction import card on Import/Export page",
-    "status": "completed"
-  },
-  {
-    "content": "Test all new features via testing_agent_v3, fix bugs",
+    "content": "Test changes",
     "status": "completed"
   }
 ]

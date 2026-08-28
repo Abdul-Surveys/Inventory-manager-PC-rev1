@@ -10,9 +10,25 @@ import { Paginator } from "@/components/Paginator";
 import { StatusChip } from "@/components/StatusChip";
 import { ItemDetailDrawer } from "@/components/ItemDetailDrawer";
 import { api, downloadReport, getErrorMessage } from "@/lib/api";
-import { formatUSD, formatUSD2, formatNumber, ITEM_TYPES } from "@/lib/format";
+import { formatUSD, formatUSD2, formatNumber, ITEM_TYPES, CRITICALITY_META } from "@/lib/format";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { toast } from "sonner";
 import { Search, Download, ShoppingCart } from "lucide-react";
+
+const CritBadge = ({ value }) => {
+  const v = Number(value) || 3;
+  const meta = CRITICALITY_META[v] || CRITICALITY_META[3];
+  return (
+    <TooltipProvider delayDuration={200}>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <span className={`inline-flex h-6 w-6 items-center justify-center rounded-full text-xs font-bold ${meta.chip}`}>{v}</span>
+        </TooltipTrigger>
+        <TooltipContent className="text-xs">{v} — {meta.label}</TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  );
+};
 
 export default function Reorder() {
   const [rows, setRows] = useState([]);
@@ -24,6 +40,7 @@ export default function Reorder() {
   const [pageSize] = useState(50);
   const [search, setSearch] = useState("");
   const [itemType, setItemType] = useState("all");
+  const [criticality, setCriticality] = useState("all");
   const [includeMinimum, setIncludeMinimum] = useState(true);
   const [loading, setLoading] = useState(true);
   const [drawerCode, setDrawerCode] = useState(null);
@@ -37,7 +54,7 @@ export default function Reorder() {
         params: {
           page: opts.page ?? page, page_size: pageSize,
           search: (opts.search ?? search) || undefined,
-          item_type: itemType, include_minimum: includeMinimum,
+          item_type: itemType, criticality, include_minimum: includeMinimum,
         },
       });
       setRows(res.data.rows);
@@ -50,12 +67,12 @@ export default function Reorder() {
     } finally {
       setLoading(false);
     }
-  }, [page, pageSize, search, itemType, includeMinimum]);
+  }, [page, pageSize, search, itemType, criticality, includeMinimum]);
 
   useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [page, itemType, includeMinimum]);
+  }, [page, itemType, criticality, includeMinimum]);
 
   const onSearchChange = (v) => {
     setSearch(v);
@@ -81,11 +98,20 @@ export default function Reorder() {
               {ITEM_TYPES.map((t) => <SelectItem key={t} value={t}>{t}</SelectItem>)}
             </SelectContent>
           </Select>
+          <Select value={criticality} onValueChange={(v) => { setCriticality(v); setPage(1); }}>
+            <SelectTrigger data-testid="reorder-criticality-filter" className="w-[180px]"><SelectValue placeholder="Criticality" /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All Criticality</SelectItem>
+              {Object.entries(CRITICALITY_META).map(([k, m]) => (
+                <SelectItem key={k} value={k}>{k} — {m.label}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
           <div className="flex items-center gap-2">
             <Switch data-testid="reorder-include-minimum-toggle" id="inc-min" checked={includeMinimum} onCheckedChange={(v) => { setIncludeMinimum(v); setPage(1); }} />
             <Label htmlFor="inc-min" className="text-sm">Include items at minimum</Label>
           </div>
-          <Button data-testid="reorder-export-button" onClick={() => downloadReport("/export/reorder", { search, item_type: itemType, include_minimum: includeMinimum })}>
+          <Button data-testid="reorder-export-button" onClick={() => downloadReport("/export/reorder", { search, item_type: itemType, criticality, include_minimum: includeMinimum })}>
             <Download className="mr-1.5 h-4 w-4" /> Export Proposal
           </Button>
         </CardContent>
@@ -119,6 +145,7 @@ export default function Reorder() {
               <thead>
                 <tr className="border-b bg-muted/40 text-left text-xs font-semibold uppercase tracking-wide text-muted-foreground">
                   <th className="px-3 py-2">Item Code</th>
+                  <th className="px-3 py-2">Crit</th>
                   <th className="px-3 py-2">Description</th>
                   <th className="px-3 py-2">Status</th>
                   <th className="px-3 py-2 text-right">Current</th>
@@ -132,10 +159,10 @@ export default function Reorder() {
               <tbody>
                 {loading ? (
                   [...Array(8)].map((_, i) => (
-                    <tr key={i} className="border-b"><td colSpan={9} className="px-3 py-2"><Skeleton className="h-6 w-full" /></td></tr>
+                    <tr key={i} className="border-b"><td colSpan={10} className="px-3 py-2"><Skeleton className="h-6 w-full" /></td></tr>
                   ))
                 ) : rows.length === 0 ? (
-                  <tr><td colSpan={9} className="px-3 py-10 text-center text-sm text-muted-foreground">No items need reordering. All stock levels are healthy.</td></tr>
+                  <tr><td colSpan={10} className="px-3 py-10 text-center text-sm text-muted-foreground">No items need reordering. All stock levels are healthy.</td></tr>
                 ) : (
                   rows.map((r) => (
                     <tr
@@ -145,6 +172,7 @@ export default function Reorder() {
                       className="h-11 cursor-pointer border-b last:border-0 odd:bg-muted/20 transition-colors hover:bg-muted/50"
                     >
                       <td className="px-3 py-2 font-mono text-xs text-primary">{r.item_code}</td>
+                      <td className="px-3 py-2"><CritBadge value={r.criticality} /></td>
                       <td className="px-3 py-2 max-w-[260px] truncate">{r.description}</td>
                       <td className="px-3 py-2"><StatusChip status={r.status} /></td>
                       <td className="px-3 py-2 text-right tabular-nums">{formatNumber(r.current_qty)}</td>
@@ -168,7 +196,7 @@ export default function Reorder() {
       <ItemDetailDrawer itemCode={drawerCode} open={drawerOpen} onOpenChange={setDrawerOpen} onChanged={() => load()} />
 
       <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
-        <ShoppingCart className="h-3.5 w-3.5" /> Suggested Order Qty = Target stock (Maximum, or Minimum when no maximum is set) − Current stock.
+        <ShoppingCart className="h-3.5 w-3.5" /> Sorted critical-first (Tier 1 → 2 → 3), then by estimated cost. Suggested Order Qty = Target stock (Maximum, or Minimum when no maximum is set) − Current stock.
       </p>
     </div>
   );

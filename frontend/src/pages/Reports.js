@@ -6,7 +6,17 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { api, downloadReport, getErrorMessage } from "@/lib/api";
 import { formatUSD, formatNumber } from "@/lib/format";
 import { toast } from "sonner";
-import { Download, TrendingUp, TrendingDown, Minus, DollarSign, ArrowLeftRight, PackageCheck, Flame } from "lucide-react";
+import { Download, TrendingUp, TrendingDown, Minus, DollarSign, ArrowLeftRight, PackageCheck, Flame, ShieldAlert } from "lucide-react";
+import { ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip as ReTooltip, Cell, LabelList } from "recharts";
+
+const fmtMonth = (ym) => {
+  try {
+    const d = new Date(ym + "-01T00:00:00");
+    return d.toLocaleDateString("en-US", { month: "short", year: "2-digit" });
+  } catch {
+    return ym;
+  }
+};
 
 const DeltaBadge = ({ value, pct, invert = false }) => {
   if (value === null || value === undefined || value === 0) {
@@ -170,6 +180,42 @@ export default function Reports() {
               </CardContent>
             </Card>
           </div>
+
+          {/* Criticality trend */}
+          {data.critical_trend && (
+            <Card className="rounded-xl shadow-sm" data-testid="report-critical-trend-card">
+              <CardHeader className="pb-2">
+                <CardTitle className="flex items-center gap-2 text-sm font-semibold uppercase tracking-wide text-muted-foreground">
+                  <ShieldAlert className="h-4 w-4 text-[hsl(var(--status-below-min))]" />
+                  Critical Items Below Minimum — Last 6 Months
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                <p className="mb-3 text-xs text-muted-foreground">
+                  How many of the {formatNumber(data.critical_trend.critical_total)} critical (Tier 1 &amp; 2) materials were below their minimum at each month-end.
+                </p>
+                <div className="h-[240px] w-full" data-testid="report-critical-trend-chart">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart data={data.critical_trend.months.map((m) => ({ ...m, label: fmtMonth(m.month) }))} margin={{ top: 20, right: 10, left: -10, bottom: 0 }}>
+                      <XAxis dataKey="label" tick={{ fontSize: 12 }} tickLine={false} axisLine={{ stroke: "hsl(var(--border))" }} />
+                      <YAxis allowDecimals={false} tick={{ fontSize: 12 }} tickLine={false} axisLine={false} width={36} />
+                      <ReTooltip
+                        cursor={{ fill: "hsl(var(--muted))" }}
+                        formatter={(v) => [v, "Below minimum"]}
+                        contentStyle={{ fontSize: 12, borderRadius: 8 }}
+                      />
+                      <Bar dataKey="below_min_count" radius={[6, 6, 0, 0]} maxBarSize={64}>
+                        <LabelList dataKey="below_min_count" position="top" style={{ fontSize: 12, fontWeight: 600, fill: "hsl(var(--foreground))" }} />
+                        {data.critical_trend.months.map((m, i) => (
+                          <Cell key={i} fill={m.below_min_count > 0 ? "hsl(var(--status-below-min))" : "hsl(var(--status-ok))"} />
+                        ))}
+                      </Bar>
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+              </CardContent>
+            </Card>
+          )}
         </>
       )}
     </div>

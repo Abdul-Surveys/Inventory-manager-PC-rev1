@@ -56,7 +56,9 @@ export default function Inventory() {
   const [selected, setSelected] = useState(() => new Set());
   const [selectAllMatching, setSelectAllMatching] = useState(false);
   const [bulkType, setBulkType] = useState("Spare Parts");
+  const [bulkCrit, setBulkCrit] = useState("1");
   const [applyingBulk, setApplyingBulk] = useState(false);
+  const [applyingBulkCrit, setApplyingBulkCrit] = useState(false);
   const debounceRef = useRef(null);
 
   const load = useCallback(async (opts = {}) => {
@@ -185,6 +187,23 @@ export default function Inventory() {
     }
   };
 
+  const applyBulkCriticality = async () => {
+    setApplyingBulkCrit(true);
+    try {
+      const payload = selectAllMatching
+        ? { new_criticality: Number(bulkCrit), select_filter: { search: search || undefined, item_type: itemType, criticality, status } }
+        : { new_criticality: Number(bulkCrit), item_codes: Array.from(selected) };
+      const res = await api.post("/items/bulk-criticality", payload);
+      toast.success(`${formatNumber(res.data.modified)} item${res.data.modified === 1 ? "" : "s"} set to Criticality ${res.data.new_criticality}`);
+      clearSelection();
+      load();
+    } catch (e) {
+      toast.error(getErrorMessage(e));
+    } finally {
+      setApplyingBulkCrit(false);
+    }
+  };
+
   return (
     <div className="space-y-4">
       {/* Toolbar */}
@@ -304,8 +323,21 @@ export default function Inventory() {
             <SelectTrigger data-testid="inventory-bulk-type-select" className="w-[150px]"><SelectValue /></SelectTrigger>
             <SelectContent>{ITEM_TYPES.map((t) => <SelectItem key={t} value={t}>{t}</SelectItem>)}</SelectContent>
           </Select>
-          <Button data-testid="inventory-bulk-apply-button" size="sm" onClick={applyBulkType} disabled={applyingBulk}>
+          <Button data-testid="inventory-bulk-apply-button" size="sm" onClick={applyBulkType} disabled={applyingBulk || applyingBulkCrit}>
             {applyingBulk ? "Applying..." : "Apply"}
+          </Button>
+          <span className="mx-1 h-5 w-px bg-border" />
+          <span className="text-sm text-muted-foreground">Criticality</span>
+          <Select value={bulkCrit} onValueChange={setBulkCrit}>
+            <SelectTrigger data-testid="inventory-bulk-criticality-select" className="w-[110px]"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              {Object.entries(CRITICALITY_META).map(([k, m]) => (
+                <SelectItem key={k} value={k}>Tier {k}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <Button data-testid="inventory-bulk-criticality-apply-button" size="sm" variant="secondary" onClick={applyBulkCriticality} disabled={applyingBulk || applyingBulkCrit}>
+            {applyingBulkCrit ? "Applying..." : "Set Crit"}
           </Button>
           <Button data-testid="inventory-bulk-clear-button" variant="ghost" size="sm" onClick={clearSelection}>
             <X className="mr-1 h-3.5 w-3.5" /> Clear

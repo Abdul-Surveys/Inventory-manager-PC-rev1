@@ -1246,15 +1246,11 @@ class BulkTypeUpdate(BaseModel):
     select_filter: Optional[dict] = None  # {search, item_type, status}
 
 
-@api_router.post("/items/bulk-type")
-async def bulk_update_type(payload: BulkTypeUpdate):
-    if payload.new_type not in ITEM_TYPES:
-        raise HTTPException(status_code=400, detail=f"Invalid item type. Allowed: {ITEM_TYPES}")
-    q = None
-    if payload.item_codes:
-        q = {"item_code": {"$in": payload.item_codes}}
-    elif payload.select_filter is not None:
-        f = payload.select_filter
+def build_bulk_query(item_codes, select_filter):
+    if item_codes:
+        return {"item_code": {"$in": item_codes}}
+    if select_filter is not None:
+        f = select_filter
         q = {}
         if f.get("search"):
             q["$or"] = [
@@ -1270,10 +1266,39 @@ async def bulk_update_type(payload: BulkTypeUpdate):
                 pass
         if f.get("status") and f["status"] != "all":
             q["status"] = f["status"]
+        return q
+    return None
+
+
+@api_router.post("/items/bulk-type")
+async def bulk_update_type(payload: BulkTypeUpdate):
+    if payload.new_type not in ITEM_TYPES:
+        raise HTTPException(status_code=400, detail=f"Invalid item type. Allowed: {ITEM_TYPES}")
+    q = build_bulk_query(payload.item_codes, payload.select_filter)
     if q is None:
         raise HTTPException(status_code=400, detail="Provide item_codes or select_filter")
     res = await db.items.update_many(q, {"$set": {"item_type": payload.new_type, "updated_at": now_iso()}})
     return {"matched": res.matched_count, "modified": res.modified_count, "new_type": payload.new_type}
+
+
+class BulkCriticalityUpdate(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    new_criticality: int
+    item_codes: Optional[List[str]] = None
+    select_filter: Optional[dict] = None
+
+
+@api_router.post("/items/bulk-criticality")
+async def bulk_update_criticality(payload: BulkCriticalityUpdate):
+    crit = normalize_criticality(payload.new_criticality)
+    if payload.new_criticality not in (1, 2, 3):
+        raise HTTPException(status_code=400, detail="new_criticality must be 1, 2, or 3")
+    q = build_bulk_query(payload.item_codes, payload.select_filter)
+    if q is None:
+        raise HTTPException(status_code=400, detail="Provide item_codes or select_filter")
+    res = await db.items.update_many(q, {"$set": {"criticality": crit, "updated_at": now_iso()}})
+    return {"matched": res.matched_count, "modified": res.modified_count,
+            "new_criticality": crit, "new_criticality_label": CRITICALITY_LABELS[crit]}
 
 
 class AutoClassifyRequest(BaseModel):
@@ -1342,11 +1367,12 @@ REORDER_PIPELINE_FIELDS = [
     {"$addFields": {"target_qty": {"$cond": [{"$gt": ["$max_qty", "$min_qty"]}, "$max_qty", "$min_qty"]}}},
     {"$addFields": {"suggested_qty": {"$ceil": {"$max": [0, {"$subtract": ["$target_qty", "$current_qty"]}]}}}},
     {"$addFields": {"est_cost": {"$round": [{"$multiply": ["$suggested_qty", "$unit_price"]}, 2]}}},
+    {"$addFields": {"crit_sort": {"$ifNull": ["$criticality", 3]}}},
     {"$match": {"suggested_qty": {"$gt": 0}}},
 ]
 
 
-def reorder_match(search, item_type, include_minimum):
+def reorder_match(search, item_type, include_minimum, criticality=None):
     statuses = [STATUS_BELOW_MIN] + ([STATUS_MINIMUM] if include_minimum else [])
     q = {"status": {"$in": statuses}}
     if search:
@@ -1356,6 +1382,11 @@ def reorder_match(search, item_type, include_minimum):
         ]
     if item_type and item_type != "all":
         q["item_type"] = item_type
+    if criticality and criticality != "all":
+        try:
+            q["criticality"] = int(criticality)
+        except (ValueError, TypeError):
+            pass
     return q
 
 
@@ -1365,13 +1396,16 @@ async def reorder_suggestions(
     page_size: int = Query(50, ge=1, le=200),
     search: Optional[str] = None,
     item_type: Optional[str] = None,
+    criticality: Optional[str] = None,
     include_minimum: bool = True,
     sort_by: str = "est_cost",
     sort_dir: str = "desc",
 ):
     sort_field = sort_by if sort_by in {"est_cost", "suggested_qty", "current_qty", "item_code"} else "est_cost"
-    pipeline = [{"$match": reorder_match(search, item_type, include_minimum)}] + REORDER_PIPELINE_FIELDS + [
-        {"$sort": {sort_field: DESCENDING if sort_dir == "desc" else ASCENDING}},
+    # Critical-first: Tier 1 spares are always ordered before anything else.
+    sort_stage = {"crit_sort": 1, sort_field: DESCENDING if sort_dir == "desc" else ASCENDING}
+    pipeline = [{"$match": reorder_match(search, item_type, include_minimum, criticality)}] + REORDER_PIPELINE_FIELDS + [
+        {"$sort": sort_stage},
         {"$facet": {
             "data": [{"$skip": (page - 1) * page_size}, {"$limit": page_size}, {"$project": {"_id": 0}}],
             "count": [{"$count": "total"}],
@@ -1389,14 +1423,18 @@ async def reorder_suggestions(
 
 
 @api_router.get("/export/reorder")
-async def export_reorder(search: Optional[str] = None, item_type: Optional[str] = None, include_minimum: bool = True):
-    pipeline = [{"$match": reorder_match(search, item_type, include_minimum)}] + REORDER_PIPELINE_FIELDS + [
-        {"$sort": {"est_cost": -1}}, {"$project": {"_id": 0}},
+async def export_reorder(search: Optional[str] = None, item_type: Optional[str] = None,
+                         criticality: Optional[str] = None, include_minimum: bool = True):
+    pipeline = [{"$match": reorder_match(search, item_type, include_minimum, criticality)}] + REORDER_PIPELINE_FIELDS + [
+        {"$sort": {"crit_sort": 1, "est_cost": -1}}, {"$project": {"_id": 0}},
     ]
     rows = await db.items.aggregate(pipeline).to_list(100000)
     df = pd.DataFrame([{
         "Item Code": r["item_code"], "Item Description": r["description"], "UOM": r["uom"],
-        "Item Type": r.get("item_type", "Other"), "Status": STATUS_LABELS.get(r.get("status"), r.get("status")),
+        "Item Type": r.get("item_type", "Other"),
+        "Criticality": normalize_criticality(r.get("criticality")),
+        "Criticality Label": CRITICALITY_LABELS[normalize_criticality(r.get("criticality"))],
+        "Status": STATUS_LABELS.get(r.get("status"), r.get("status")),
         "Current Stock": r["current_qty"], "Minimum": r["min_qty"], "Maximum": r["max_qty"],
         "Target Qty": r["target_qty"], "Suggested Order Qty": r["suggested_qty"],
         "Unit Rate (USD)": r["unit_price"], "Estimated Cost (USD)": r["est_cost"],
@@ -1483,6 +1521,49 @@ def pct_change(cur, prev):
     return round((cur - prev) / abs(prev) * 100, 1)
 
 
+async def critical_below_min_trend(end_ym: str, months_back: int = 6):
+    """Count Tier 1 & 2 (critical) items that were below their minimum at each month-end
+    for the last `months_back` months ending at `end_ym`.
+
+    Month-end stock is reconstructed authoritatively from current stock by reversing all
+    net movements that occurred after that month-end (robust to how opening balances are stored).
+    """
+    crit_items = await db.items.find(
+        {"criticality": {"$in": [1, 2]}},
+        {"_id": 0, "item_code": 1, "min_qty": 1, "current_qty": 1, "criticality": 1},
+    ).to_list(100000)
+
+    months = [shift_month(end_ym, -(months_back - 1) + k) for k in range(months_back)]
+
+    if not crit_items:
+        return {"months": [{"month": m, "below_min_count": 0} for m in months], "critical_total": 0}
+
+    codes = [i["item_code"] for i in crit_items]
+    pipeline = [
+        {"$match": {"item_code": {"$in": codes}}},
+        {"$group": {
+            "_id": {"code": "$item_code", "month": {"$substrCP": ["$date", 0, 7]}},
+            "net": {"$sum": {"$cond": [{"$eq": ["$direction", "IN"]}, "$qty", {"$multiply": ["$qty", -1]}]}},
+        }},
+    ]
+    rows = await db.transactions.aggregate(pipeline).to_list(1000000)
+    net_map = {}
+    for r in rows:
+        net_map.setdefault(r["_id"]["code"], {})[r["_id"]["month"]] = r["net"] or 0
+
+    result = []
+    for m in months:
+        below = 0
+        for it in crit_items:
+            movements = net_map.get(it["item_code"], {})
+            after = sum(v for mm, v in movements.items() if mm > m)
+            stock_end = (it.get("current_qty", 0) or 0) - after
+            if stock_end < (it.get("min_qty", 0) or 0):
+                below += 1
+        result.append({"month": m, "below_min_count": below})
+    return {"months": result, "critical_total": len(crit_items)}
+
+
 async def build_monthly_snapshot(month: Optional[str] = None):
     now = datetime.now(timezone.utc)
     ym = month or now.strftime("%Y-%m")
@@ -1516,6 +1597,7 @@ async def build_monthly_snapshot(month: Optional[str] = None):
             "txn_count": cur_stats["txn_count"] - prev_stats["txn_count"],
         },
         "top_consumed": top_consumed,
+        "critical_trend": await critical_below_min_trend(ym, 6),
     }
 
 
@@ -1556,6 +1638,15 @@ async def export_monthly_snapshot(month: Optional[str] = None):
             top.to_excel(writer, index=False, sheet_name="Monthly Snapshot", startrow=start2)
         else:
             ws.write(start2, 0, "No consumption recorded this month.")
+
+        # Critical materials below-minimum trend
+        trend = snap.get("critical_trend", {})
+        trend_df = pd.DataFrame([{"Month": t["month"], "Critical Items Below Minimum": t["below_min_count"]}
+                                 for t in trend.get("months", [])])
+        start3 = start2 + max(len(top), 1) + 3
+        ws.write(start3 - 1, 0, f"Critical Items Below Minimum - Last 6 Months (of {trend.get('critical_total', 0)} critical items)", bold)
+        if len(trend_df):
+            trend_df.to_excel(writer, index=False, sheet_name="Monthly Snapshot", startrow=start3)
     buf.seek(0)
     return StreamingResponse(
         buf,

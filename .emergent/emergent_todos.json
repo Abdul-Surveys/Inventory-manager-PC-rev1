@@ -1,30 +1,18 @@
 [
   {
-    "content": "Backend: add rules-based classify_criticality() + /items/auto-classify endpoint",
+    "content": "Criticality Trend on Monthly Report (backend + chart)",
     "status": "completed"
   },
   {
-    "content": "Backend: add by_criticality breakdown to /dashboard",
+    "content": "Critical-first Reorder Proposals (backend sort + filter + column)",
     "status": "completed"
   },
   {
-    "content": "Backend: add Criticality Label + Avg Yearly Consumption to inventory export",
+    "content": "Bulk criticality set on Inventory (backend + UI)",
     "status": "completed"
   },
   {
-    "content": "Frontend: Dashboard criticality breakdown card",
+    "content": "Test all three new features",
     "status": "completed"
-  },
-  {
-    "content": "Frontend: Settings Auto-Classify card (preview + apply)",
-    "status": "completed"
-  },
-  {
-    "content": "Backend + Frontend: Critical Materials dashboard page (/critical, /dashboard/critical, /export/critical)",
-    "status": "completed"
-  },
-  {
-    "content": "Test all features (backend + frontend)",
-    "status": "in_progress"
   }
 ]

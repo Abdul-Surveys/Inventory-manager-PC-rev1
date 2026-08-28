@@ -127,6 +127,36 @@ def normalize_criticality(v) -> int:
         return 3
 
 
+# Rules-based criticality classification from item description.
+# Order matters: a Tier-1 (safety/critical) keyword wins over Tier-2 (production/operational).
+CRIT1_KEYWORDS = [
+    "safety valve", "relief valve", "psv", "prv", "esd", "sdv", "shutdown valve", "blowdown",
+    "blow down", "fire", "flame detector", "gas detector", "smoke detector", "h2s", "wellhead",
+    "christmas tree", "actuator", "governor", "protection relay", "emergency", "turbine",
+    "critical", "annunciator", "fusible", "deluge", "pressure safety", "rupture disc",
+    "flare", "ignition", "explosion", "lifesaving", "life saving", "escape", "detector",
+]
+CRIT2_KEYWORDS = [
+    "pump", "motor", "valve", "transmitter", "sensor", "gauge", "filter", "gasket",
+    "controller", "plc", "breaker", "transformer", "heat exchanger", "bearing", "impeller",
+    "coupling", "instrument", "solenoid", "regulator", "compressor", "seal", "switch",
+    "relay", "cooler", "fan", "blower", "generator", "alternator", "rotor", "stator",
+    "cartridge", "element", "diaphragm", "packing", "shaft", "gear", "manifold",
+]
+
+
+def classify_criticality(description: str) -> int:
+    """Suggest a criticality tier (1/2/3) from a free-text item description."""
+    d = (description or "").lower()
+    for kw in CRIT1_KEYWORDS:
+        if kw in d:
+            return 1
+    for kw in CRIT2_KEYWORDS:
+        if kw in d:
+            return 2
+    return 3
+
+
 def month_list(start_ym: str, end_ym: str) -> List[str]:
     """Inclusive list of YYYY-MM months between two month keys."""
     try:
@@ -778,6 +808,7 @@ async def dashboard():
             "by_type": [{"$group": {"_id": "$item_type", "value": {"$sum": "$total_value"}, "count": {"$sum": 1}}},
                         {"$sort": {"value": -1}}],
             "by_status": [{"$group": {"_id": "$status", "count": {"$sum": 1}, "value": {"$sum": "$total_value"}}}],
+            "by_criticality": [{"$group": {"_id": "$criticality", "count": {"$sum": 1}, "value": {"$sum": "$total_value"}}}],
             "top20": [{"$match": {"total_value": {"$gt": 0}}}, {"$sort": {"total_value": -1}}, {"$limit": 20},
                       {"$project": {"_id": 0}}],
         }}
@@ -788,6 +819,19 @@ async def dashboard():
     by_type = [{"item_type": b["_id"] or "Other", "value": round(b["value"], 2), "count": b["count"],
                 "pct": round((b["value"] / total_value * 100), 1) if total_value else 0} for b in f["by_type"]]
     by_status = {b["_id"]: {"count": b["count"], "value": round(b["value"], 2)} for b in f["by_status"]}
+
+    crit_counts = {1: 0, 2: 0, 3: 0}
+    crit_value = {1: 0, 2: 0, 3: 0}
+    for b in f.get("by_criticality", []):
+        c = normalize_criticality(b["_id"])
+        crit_counts[c] += b["count"]
+        crit_value[c] += b["value"] or 0
+    total_items_cnt = totals.get("total_items", 0)
+    by_criticality = [{
+        "criticality": c, "label": CRITICALITY_LABELS[c],
+        "count": crit_counts[c], "value": round(crit_value[c], 2),
+        "pct": round((crit_counts[c] / total_items_cnt * 100), 1) if total_items_cnt else 0,
+    } for c in (1, 2, 3)]
 
     low_stock_items = await db.items.find(
         {"status": {"$in": [STATUS_BELOW_MIN, STATUS_MINIMUM]}}, {"_id": 0}
@@ -808,6 +852,7 @@ async def dashboard():
         "total_items": totals.get("total_items", 0),
         "total_stock_units": totals.get("total_stock_units", 0),
         "by_type": by_type,
+        "by_criticality": by_criticality,
         "by_status": by_status,
         "top20": f["top20"],
         "low_stock_items": low_stock_items,
@@ -815,6 +860,78 @@ async def dashboard():
         "non_moving_count": non_moving_count,
         "settings": settings,
     }
+
+
+@api_router.get("/dashboard/critical")
+async def critical_dashboard():
+    """Focused view on critical materials (criticality Tier 1 & 2)."""
+    agg = await db.items.aggregate([
+        {"$match": {"criticality": {"$in": [1, 2]}}},
+        {"$group": {"_id": {"crit": "$criticality", "status": "$status"},
+                    "count": {"$sum": 1}, "value": {"$sum": "$total_value"}}},
+    ]).to_list(200)
+
+    tiers = {1: {"count": 0, "value": 0.0, "status": {}},
+             2: {"count": 0, "value": 0.0, "status": {}}}
+    for b in agg:
+        c = normalize_criticality(b["_id"].get("crit"))
+        if c not in (1, 2):
+            continue
+        st = b["_id"].get("status") or STATUS_OK
+        tiers[c]["count"] += b["count"]
+        tiers[c]["value"] += b["value"] or 0
+        tiers[c]["status"][st] = tiers[c]["status"].get(st, 0) + b["count"]
+
+    def tier_payload(c):
+        t = tiers[c]
+        s = t["status"]
+        return {
+            "criticality": c, "label": CRITICALITY_LABELS[c],
+            "count": t["count"], "value": round(t["value"], 2),
+            "below_min": s.get(STATUS_BELOW_MIN, 0), "minimum": s.get(STATUS_MINIMUM, 0),
+            "ok": s.get(STATUS_OK, 0), "above_max": s.get(STATUS_ABOVE_MAX, 0),
+        }
+
+    by_tier = [tier_payload(1), tier_payload(2)]
+    total_count = sum(t["count"] for t in by_tier)
+    total_value = sum(t["value"] for t in by_tier)
+    reorder_count = sum(t["below_min"] + t["minimum"] for t in by_tier)
+    below_min_count = sum(t["below_min"] for t in by_tier)
+
+    at_risk = await db.items.aggregate([
+        {"$match": {"criticality": {"$in": [1, 2]},
+                    "status": {"$in": [STATUS_BELOW_MIN, STATUS_MINIMUM]}}},
+        {"$sort": {"criticality": 1, "total_value": -1}},
+        {"$limit": 100},
+        {"$project": {"_id": 0}},
+    ]).to_list(100)
+
+    return {
+        "total_count": total_count,
+        "total_value": round(total_value, 2),
+        "reorder_count": reorder_count,
+        "below_min_count": below_min_count,
+        "by_tier": by_tier,
+        "at_risk": at_risk,
+    }
+
+
+@api_router.get("/export/critical")
+async def export_critical():
+    items = await db.items.find(
+        {"criticality": {"$in": [1, 2]}}, {"_id": 0}
+    ).sort([("criticality", ASCENDING), ("total_value", DESCENDING)]).to_list(100000)
+    df = pd.DataFrame([{
+        "Item Code": i["item_code"], "Item Description": i["description"], "UOM": i["uom"],
+        "Item Type": i.get("item_type", "Other"),
+        "Criticality": normalize_criticality(i.get("criticality")),
+        "Criticality Label": CRITICALITY_LABELS[normalize_criticality(i.get("criticality"))],
+        "Minimum Stock": i["min_qty"], "Maximum Stock": i["max_qty"], "Current Stock": i["current_qty"],
+        "Unit Rate (USD)": i["unit_price"], "Total Value (USD)": i["total_value"],
+        "Status": STATUS_LABELS.get(i.get("status"), i.get("status")),
+    } for i in items])
+    return df_to_excel_response(df, "Critical Materials", "critical_materials.xlsx")
+
 
 
 # ---------------------------- Consumption Analysis (list) ----------------------------
@@ -1010,11 +1127,21 @@ async def export_inventory(search: Optional[str] = None, item_type: Optional[str
     if status and status != "all":
         q["status"] = status
     items = await db.items.find(q, {"_id": 0}).sort("item_code", ASCENDING).to_list(100000)
+    # Build avg-yearly-consumption map from transaction history (independent of criticality Z)
+    settings = await get_settings_doc()
+    cons_map = {}
+    agg = await db.transactions.aggregate(analysis_group_pipeline()).to_list(100000)
+    for d in agg:
+        r = build_analysis_row(d, {"current_qty": 0}, settings)
+        cons_map[d["_id"]] = r["stats"]["avg_yearly_consumption"]
     df = pd.DataFrame([{
         "Item Code": i["item_code"], "Item Description": i["description"], "UOM": i["uom"],
         "Item Type": i.get("item_type", "Other"), "Minimum Stock": i["min_qty"], "Maximum Stock": i["max_qty"],
         "Current Stock": i["current_qty"], "Unit Rate (USD)": i["unit_price"], "Total Value (USD)": i["total_value"],
-        "Status": STATUS_LABELS.get(i.get("status"), i.get("status")), "Criticality": i.get("criticality") or "",
+        "Status": STATUS_LABELS.get(i.get("status"), i.get("status")),
+        "Criticality": normalize_criticality(i.get("criticality")),
+        "Criticality Label": CRITICALITY_LABELS[normalize_criticality(i.get("criticality"))],
+        "Avg Yearly Consumption": cons_map.get(i["item_code"], 0),
     } for i in items])
     return df_to_excel_response(df, "Inventory", "inventory_report.xlsx")
 
@@ -1147,6 +1274,66 @@ async def bulk_update_type(payload: BulkTypeUpdate):
         raise HTTPException(status_code=400, detail="Provide item_codes or select_filter")
     res = await db.items.update_many(q, {"$set": {"item_type": payload.new_type, "updated_at": now_iso()}})
     return {"matched": res.matched_count, "modified": res.modified_count, "new_type": payload.new_type}
+
+
+class AutoClassifyRequest(BaseModel):
+    dry_run: bool = True
+    only_unclassified: bool = True  # only touch items currently at criticality 3
+
+
+@api_router.post("/items/auto-classify")
+async def auto_classify_criticality(payload: AutoClassifyRequest):
+    """Rules-based helper that suggests a criticality tier from each item's description.
+
+    - dry_run=True returns a preview (counts + sample changes) without modifying data
+    - only_unclassified=True limits scope to items currently at criticality 3 (default),
+      preserving any manual 1/2 assignments
+    """
+    q = {}
+    if payload.only_unclassified:
+        q = {"$or": [{"criticality": 3}, {"criticality": {"$exists": False}}, {"criticality": None}]}
+    cursor = db.items.find(q, {"_id": 0, "item_code": 1, "description": 1, "criticality": 1})
+
+    suggested_counts = {1: 0, 2: 0, 3: 0}
+    change_ops = []
+    samples = []
+    changed = 0
+    scanned = 0
+    async for it in cursor:
+        scanned += 1
+        cur = normalize_criticality(it.get("criticality"))
+        sug = classify_criticality(it.get("description"))
+        suggested_counts[sug] += 1
+        if sug != cur:
+            changed += 1
+            if len(samples) < 50:
+                samples.append({
+                    "item_code": it["item_code"], "description": it.get("description", ""),
+                    "current": cur, "suggested": sug,
+                    "suggested_label": CRITICALITY_LABELS[sug],
+                })
+            if not payload.dry_run:
+                change_ops.append(UpdateOne(
+                    {"item_code": it["item_code"]},
+                    {"$set": {"criticality": sug, "updated_at": now_iso()}},
+                ))
+
+    applied = 0
+    if not payload.dry_run and change_ops:
+        BATCH = 2000
+        for i in range(0, len(change_ops), BATCH):
+            res = await db.items.bulk_write(change_ops[i:i + BATCH], ordered=False)
+            applied += res.modified_count
+
+    return {
+        "scanned": scanned,
+        "suggested_counts": suggested_counts,
+        "changes": changed,
+        "applied": applied,
+        "dry_run": payload.dry_run,
+        "only_unclassified": payload.only_unclassified,
+        "samples": samples,
+    }
 
 
 # ---------------------------- Reorder Suggestions ----------------------------

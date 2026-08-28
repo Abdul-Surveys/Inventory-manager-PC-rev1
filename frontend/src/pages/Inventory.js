@@ -43,7 +43,7 @@ export default function Inventory() {
   const [pageSize] = useState(50);
   const [search, setSearch] = useState("");
   const [itemType, setItemType] = useState("all");
-  const [criticality, setCriticality] = useState("all");
+  const [criticality, setCriticality] = useState(searchParams.get("criticality") || "all");
   const [status, setStatus] = useState(searchParams.get("status") || "all");
   const [sortBy, setSortBy] = useState("item_code");
   const [sortDir, setSortDir] = useState("asc");

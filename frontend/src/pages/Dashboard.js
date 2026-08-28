@@ -7,9 +7,9 @@ import { KpiCard } from "@/components/KpiCard";
 import { StatusChip } from "@/components/StatusChip";
 import { ItemDetailDrawer } from "@/components/ItemDetailDrawer";
 import { api, downloadReport, getErrorMessage } from "@/lib/api";
-import { formatUSD, formatNumber, STATUS_META } from "@/lib/format";
+import { formatUSD, formatNumber, STATUS_META, CRITICALITY_META } from "@/lib/format";
 import { toast } from "sonner";
-import { DollarSign, Boxes, AlertTriangle, PackageX, Download, ArrowRight } from "lucide-react";
+import { DollarSign, Boxes, AlertTriangle, PackageX, Download, ArrowRight, ShieldCheck } from "lucide-react";
 import { ResponsiveContainer, PieChart, Pie, Cell, Tooltip as ReTooltip } from "recharts";
 
 const TYPE_COLORS = ["hsl(var(--chart-1))", "hsl(var(--chart-2))", "hsl(var(--chart-3))", "hsl(var(--chart-4))", "hsl(var(--chart-5))"];
@@ -138,6 +138,40 @@ export default function Dashboard() {
               <StatusChip status={it.status} />
             </button>
           ))}
+        </CardContent>
+      </Card>
+
+      {/* Criticality breakdown */}
+      <Card className="col-span-12 rounded-xl shadow-sm">
+        <CardHeader className="flex flex-row items-center justify-between pb-3">
+          <CardTitle className="flex items-center gap-2 text-sm font-semibold uppercase tracking-wide text-muted-foreground">
+            <ShieldCheck className="h-4 w-4" /> Items by Criticality
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+            {(data.by_criticality || []).map((c) => {
+              const meta = CRITICALITY_META[c.criticality] || CRITICALITY_META[3];
+              return (
+                <Link
+                  key={c.criticality}
+                  to={`/inventory?criticality=${c.criticality}`}
+                  data-testid={`dashboard-criticality-tile-${c.criticality}`}
+                  className="group flex items-center gap-3 rounded-lg border px-4 py-3 transition-colors hover:bg-muted/50"
+                >
+                  <span className={`inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-sm font-bold ${meta.chip}`}>
+                    {c.criticality}
+                  </span>
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-xs font-medium text-muted-foreground">{c.label}</p>
+                    <p className="text-xl font-bold tabular-nums">{formatNumber(c.count)}</p>
+                    <p className="text-xs text-muted-foreground tabular-nums">{c.pct}% of items · {formatUSD(c.value)}</p>
+                  </div>
+                  <ArrowRight className="h-4 w-4 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100" />
+                </Link>
+              );
+            })}
+          </div>
         </CardContent>
       </Card>
 

@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { NavLink, useLocation } from "react-router-dom";
 import {
-  LayoutDashboard, Boxes, ArrowLeftRight, TrendingUp, PackageX, FileUp, Settings, Menu, ShoppingCart, CalendarRange,
+  LayoutDashboard, Boxes, ArrowLeftRight, TrendingUp, PackageX, FileUp, Settings, Menu, ShoppingCart, CalendarRange, ShieldAlert,
 } from "lucide-react";
 import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet";
 import { Button } from "@/components/ui/button";
@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/button";
 const NAV = [
   { to: "/", label: "Dashboard", icon: LayoutDashboard, testId: "sidebar-nav-dashboard-link" },
   { to: "/inventory", label: "Inventory", icon: Boxes, testId: "sidebar-nav-inventory-link" },
+  { to: "/critical", label: "Critical Materials", icon: ShieldAlert, testId: "sidebar-nav-critical-link" },
   { to: "/transactions", label: "Transactions", icon: ArrowLeftRight, testId: "sidebar-nav-transactions-link" },
   { to: "/analysis", label: "Consumption & Min/Max", icon: TrendingUp, testId: "sidebar-nav-analysis-link" },
   { to: "/reorder", label: "Reorder Proposals", icon: ShoppingCart, testId: "sidebar-nav-reorder-link" },
@@ -21,6 +22,7 @@ const NAV = [
 const PAGE_TITLES = {
   "/": "Management Dashboard",
   "/inventory": "Main Stock / Inventory",
+  "/critical": "Critical Materials Dashboard",
   "/transactions": "Warehouse Transactions",
   "/analysis": "Consumption Analysis & Min/Max Recommendations",
   "/reorder": "Purchase Reorder Proposals",

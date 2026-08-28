@@ -11,6 +11,7 @@ import ImportExport from "@/pages/ImportExport";
 import SettingsPage from "@/pages/Settings";
 import Reports from "@/pages/Reports";
 import Reorder from "@/pages/Reorder";
+import CriticalMaterials from "@/pages/CriticalMaterials";
 
 function App() {
   return (
@@ -19,6 +20,7 @@ function App() {
         <Routes>
           <Route path="/" element={<Dashboard />} />
           <Route path="/inventory" element={<Inventory />} />
+          <Route path="/critical" element={<CriticalMaterials />} />
           <Route path="/transactions" element={<Transactions />} />
           <Route path="/analysis" element={<Analysis />} />
           <Route path="/reorder" element={<Reorder />} />

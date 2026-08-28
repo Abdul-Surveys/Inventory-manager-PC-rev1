@@ -1,18 +1,30 @@
 [
   {
-    "content": "Update criticality descriptions (1=Operations & maintenance critical spares, 2=Medium critical spares, 3=Normal/Non-critical)",
+    "content": "Backend: add rules-based classify_criticality() + /items/auto-classify endpoint",
     "status": "completed"
   },
   {
-    "content": "Add avg monthly/yearly consumption columns in Consumption/Analysis tab",
+    "content": "Backend: add by_criticality breakdown to /dashboard",
     "status": "completed"
   },
   {
-    "content": "Add criticality column + filter in Inventory tab (frontend + backend)",
+    "content": "Backend: add Criticality Label + Avg Yearly Consumption to inventory export",
     "status": "completed"
   },
   {
-    "content": "Test changes",
+    "content": "Frontend: Dashboard criticality breakdown card",
     "status": "completed"
+  },
+  {
+    "content": "Frontend: Settings Auto-Classify card (preview + apply)",
+    "status": "completed"
+  },
+  {
+    "content": "Backend + Frontend: Critical Materials dashboard page (/critical, /dashboard/critical, /export/critical)",
+    "status": "completed"
+  },
+  {
+    "content": "Test all features (backend + frontend)",
+    "status": "in_progress"
   }
 ]

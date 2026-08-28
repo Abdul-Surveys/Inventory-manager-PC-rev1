@@ -1,10 +1,8 @@
 import requests
 import sys
-import io
+import json
+from io import BytesIO
 import pandas as pd
-import statistics
-import math
-from datetime import datetime
 
 BASE_URL = "https://nifty-matsumoto-10.preview.emergentagent.com/api"
 
@@ -15,333 +13,319 @@ class BackendTester:
         self.tests_failed = 0
         self.failures = []
 
-    def test(self, name, condition, expected=None, actual=None, tolerance=None):
-        """Run a single test assertion"""
+    def test(self, name, func):
+        """Run a single test"""
         self.tests_run += 1
-        if tolerance is not None and expected is not None and actual is not None:
-            # Numeric comparison with tolerance
-            condition = abs(actual - expected) <= tolerance
-        
-        if condition:
-            self.tests_passed += 1
-            print(f"✅ {name}")
-            if expected is not None and actual is not None:
-                print(f"   Expected: {expected}, Actual: {actual}")
-        else:
-            self.tests_failed += 1
-            self.failures.append(name)
-            print(f"❌ {name}")
-            if expected is not None and actual is not None:
-                print(f"   Expected: {expected}, Actual: {actual}")
-        return condition
-
-    def api_call(self, method, endpoint, **kwargs):
-        """Make API call and return response"""
-        url = f"{BASE_URL}/{endpoint}"
+        print(f"\n{'='*60}")
+        print(f"TEST {self.tests_run}: {name}")
+        print('='*60)
         try:
-            if method == "GET":
-                resp = requests.get(url, timeout=30, **kwargs)
-            elif method == "POST":
-                resp = requests.post(url, timeout=30, **kwargs)
-            elif method == "PUT":
-                resp = requests.put(url, timeout=30, **kwargs)
-            elif method == "DELETE":
-                resp = requests.delete(url, timeout=30, **kwargs)
-            return resp
+            func()
+            self.tests_passed += 1
+            print(f"✅ PASSED: {name}")
+            return True
+        except AssertionError as e:
+            self.tests_failed += 1
+            self.failures.append({"test": name, "error": str(e)})
+            print(f"❌ FAILED: {name}")
+            print(f"   Error: {e}")
+            return False
         except Exception as e:
-            print(f"❌ API call failed: {method} {endpoint} - {str(e)}")
-            return None
+            self.tests_failed += 1
+            self.failures.append({"test": name, "error": f"Exception: {str(e)}"})
+            print(f"❌ FAILED: {name}")
+            print(f"   Exception: {e}")
+            return False
 
-    def create_transaction_xlsx(self, transactions):
-        """Create xlsx file with transactions"""
-        df = pd.DataFrame(transactions)
-        buffer = io.BytesIO()
-        df.to_excel(buffer, index=False, engine='openpyxl')
-        buffer.seek(0)
-        return buffer
+    def summary(self):
+        """Print test summary"""
+        print(f"\n{'='*60}")
+        print("TEST SUMMARY")
+        print('='*60)
+        print(f"Total Tests: {self.tests_run}")
+        print(f"Passed: {self.tests_passed}")
+        print(f"Failed: {self.tests_failed}")
+        print(f"Success Rate: {(self.tests_passed/self.tests_run*100):.1f}%")
+        
+        if self.failures:
+            print(f"\n{'='*60}")
+            print("FAILED TESTS:")
+            print('='*60)
+            for f in self.failures:
+                print(f"❌ {f['test']}")
+                print(f"   {f['error']}")
+        
+        return self.tests_failed == 0
+
 
 def main():
     tester = BackendTester()
-    print("=" * 80)
-    print("PETROCHINA GPP INVENTORY - MIN/MAX RECOMMENDATION ENGINE TEST")
-    print("=" * 80)
 
-    # ========================================================================
-    # STEP 1: Create test item SPECTEST1
-    # ========================================================================
-    print("\n📝 STEP 1: Creating test item SPECTEST1...")
-    resp = tester.api_call("POST", "items", json={
-        "item_code": "SPECTEST1",
-        "description": "Test Item for Spec Validation",
-        "uom": "PCS",
-        "item_type": "Other",
-        "criticality": 1,
-        "min_qty": 0,
-        "max_qty": 0,
-        "current_qty": 0,
-        "unit_price": 10.0
-    })
-    
-    if resp and resp.status_code == 200:
-        tester.test("Create SPECTEST1 item", True)
-        print(f"   Item created: {resp.json().get('item_code')}")
-    else:
-        tester.test("Create SPECTEST1 item", False)
-        print(f"   Failed: {resp.status_code if resp else 'No response'} - {resp.text if resp else ''}")
-        print("❌ Cannot proceed without test item. Exiting.")
-        return 1
-
-    # ========================================================================
-    # STEP 2: Import transactions for SPECTEST1
-    # ========================================================================
-    print("\n📝 STEP 2: Importing transactions for SPECTEST1...")
-    transactions = [
-        {"Date": "2026-01-10", "Item Code": "SPECTEST1", "Direction": "IN", "Quantity": 100, "Transaction Type": "Purchase Order", "Reference No": "TEST-PO-001", "Notes": ""},
-        {"Date": "2026-02-05", "Item Code": "SPECTEST1", "Direction": "OUT", "Quantity": 10, "Transaction Type": "Work Order", "Reference No": "TEST-WO-001", "Notes": ""},
-        {"Date": "2026-04-10", "Item Code": "SPECTEST1", "Direction": "OUT", "Quantity": 20, "Transaction Type": "Work Order", "Reference No": "TEST-WO-002", "Notes": ""},
-        {"Date": "2026-06-15", "Item Code": "SPECTEST1", "Direction": "OUT", "Quantity": 6, "Transaction Type": "Work Order", "Reference No": "TEST-WO-003", "Notes": ""},
-    ]
-    
-    xlsx_buffer = tester.create_transaction_xlsx(transactions)
-    files = {'file': ('transactions.xlsx', xlsx_buffer, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')}
-    
-    resp = tester.api_call("POST", "import/transactions?apply_to_stock=true", files=files)
-    
-    if resp and resp.status_code == 200:
-        result = resp.json()
-        tester.test("Import transactions", True)
-        print(f"   Imported: {result.get('total_imported', 0)} transactions")
-    else:
-        tester.test("Import transactions", False)
-        print(f"   Failed: {resp.status_code if resp else 'No response'} - {resp.text if resp else ''}")
-        print("❌ Cannot proceed without transactions. Exiting.")
-        return 1
-
-    # ========================================================================
-    # STEP 3: Verify analysis calculations (CRITICAL TEST)
-    # ========================================================================
-    print("\n📝 STEP 3: Verifying analysis calculations for SPECTEST1 (CRITICAL)...")
-    resp = tester.api_call("GET", "items/SPECTEST1/analysis")
-    
-    if not resp or resp.status_code != 200:
-        tester.test("GET /api/items/SPECTEST1/analysis", False)
-        print(f"   Failed: {resp.status_code if resp else 'No response'}")
-        return 1
-    
-    data = resp.json()
-    stats = data.get('stats', {})
-    item = data.get('item', {})
-    
-    print("\n   Verifying statistical calculations:")
-    
-    # Expected values based on spec
-    expected_first_in = "2026-01-10"
-    expected_months_history = 8  # Jan 2026 through Aug 2026
-    expected_cumulative = 36  # 10 + 20 + 6
-    expected_avg_monthly = 4.5  # 36 / 8
-    
-    # Calculate expected std dev: [0, 10, 0, 20, 0, 6, 0, 0]
-    monthly_series = [0, 10, 0, 20, 0, 6, 0, 0]
-    expected_std_dev = round(statistics.stdev(monthly_series), 2)  # Should be ~7.52
-    
-    expected_lead_time_demand = round(expected_avg_monthly * 3, 2)  # 13.5
-    expected_safety_stock = round(0.842 * expected_std_dev * math.sqrt(3), 2)  # ~10.97
-    expected_rec_min = math.ceil(expected_lead_time_demand + expected_safety_stock)  # 25
-    expected_six_month_demand = round(expected_avg_monthly * 6, 2)  # 27
-    expected_rec_max = math.ceil(expected_six_month_demand + expected_safety_stock)  # 38
-    expected_current_qty = 64  # 100 - 36
-    expected_stock_status = "OK"  # 64 > 25
-    expected_confidence = "NORMAL"  # 8 months, 5/8 zero = 62.5% <= 66%
-    
-    # Run tests
-    tester.test("first_in_date", stats.get('first_in_date') == expected_first_in, expected_first_in, stats.get('first_in_date'))
-    tester.test("months_history", stats.get('months_history') == expected_months_history, expected_months_history, stats.get('months_history'))
-    tester.test("cumulative_consumption", stats.get('cumulative_consumption') == expected_cumulative, expected_cumulative, stats.get('cumulative_consumption'))
-    tester.test("avg_monthly_consumption", stats.get('avg_monthly_consumption') == expected_avg_monthly, expected_avg_monthly, stats.get('avg_monthly_consumption'))
-    tester.test("consumption_std_dev", stats.get('consumption_std_dev'), expected_std_dev, stats.get('consumption_std_dev'), tolerance=0.01)
-    tester.test("lead_time_demand", stats.get('lead_time_demand') == expected_lead_time_demand, expected_lead_time_demand, stats.get('lead_time_demand'))
-    tester.test("safety_stock", stats.get('safety_stock'), expected_safety_stock, stats.get('safety_stock'), tolerance=0.01)
-    tester.test("recommended_min", stats.get('recommended_min') == expected_rec_min, expected_rec_min, stats.get('recommended_min'))
-    tester.test("six_month_demand", stats.get('six_month_demand') == expected_six_month_demand, expected_six_month_demand, stats.get('six_month_demand'))
-    tester.test("recommended_max", stats.get('recommended_max') == expected_rec_max, expected_rec_max, stats.get('recommended_max'))
-    tester.test("current_qty", item.get('current_qty') == expected_current_qty, expected_current_qty, item.get('current_qty'))
-    tester.test("stock_status", stats.get('stock_status') == expected_stock_status, expected_stock_status, stats.get('stock_status'))
-    tester.test("confidence", stats.get('confidence') == expected_confidence, expected_confidence, stats.get('confidence'))
-    tester.test("criticality", stats.get('criticality') == 1, 1, stats.get('criticality'))
-    tester.test("service_level", stats.get('service_level') == 80, 80, stats.get('service_level'))
-    tester.test("z_value", stats.get('z_value') == 0.842, 0.842, stats.get('z_value'))
-
-    # ========================================================================
-    # STEP 4: Change criticality to 3 and verify
-    # ========================================================================
-    print("\n📝 STEP 4: Changing criticality to 3 and verifying...")
-    resp = tester.api_call("PUT", "items/SPECTEST1", json={"criticality": 3})
-    
-    if resp and resp.status_code == 200:
-        tester.test("Update criticality to 3", True)
-    else:
-        tester.test("Update criticality to 3", False)
-        print(f"   Failed: {resp.status_code if resp else 'No response'}")
-    
-    # Verify new calculations
-    resp = tester.api_call("GET", "items/SPECTEST1/analysis")
-    if resp and resp.status_code == 200:
+    # Test 1: GET /api/items?criticality=1 returns only criticality 1 items
+    def test_items_criticality_filter_1():
+        resp = requests.get(f"{BASE_URL}/items", params={"criticality": "1", "page_size": 100})
+        assert resp.status_code == 200, f"Expected 200, got {resp.status_code}"
         data = resp.json()
-        stats = data.get('stats', {})
-        
-        # With criticality 3: Z=0, safety_stock=0
-        expected_rec_min_c3 = math.ceil(13.5)  # 14
-        expected_rec_max_c3 = math.ceil(27)  # 27
-        
-        tester.test("criticality=3: z_value", stats.get('z_value') == 0, 0, stats.get('z_value'))
-        tester.test("criticality=3: safety_stock", stats.get('safety_stock') == 0, 0, stats.get('safety_stock'))
-        tester.test("criticality=3: recommended_min", stats.get('recommended_min') == expected_rec_min_c3, expected_rec_min_c3, stats.get('recommended_min'))
-        tester.test("criticality=3: recommended_max", stats.get('recommended_max') == expected_rec_max_c3, expected_rec_max_c3, stats.get('recommended_max'))
+        assert "items" in data, "Response missing 'items' field"
+        print(f"   Found {len(data['items'])} items with criticality=1")
+        for item in data["items"]:
+            assert "criticality" in item, f"Item {item.get('item_code')} missing criticality field"
+            assert item["criticality"] == 1, f"Item {item.get('item_code')} has criticality {item['criticality']}, expected 1"
+        print(f"   ✓ All items have criticality=1")
 
-    # ========================================================================
-    # STEP 5: Test GET /api/analysis
-    # ========================================================================
-    print("\n📝 STEP 5: Testing GET /api/analysis...")
-    resp = tester.api_call("GET", "analysis")
-    
-    if resp and resp.status_code == 200:
+    tester.test("GET /api/items?criticality=1 returns only criticality 1 items", test_items_criticality_filter_1)
+
+    # Test 2: GET /api/items?criticality=2 returns only criticality 2 items
+    def test_items_criticality_filter_2():
+        resp = requests.get(f"{BASE_URL}/items", params={"criticality": "2", "page_size": 100})
+        assert resp.status_code == 200, f"Expected 200, got {resp.status_code}"
         data = resp.json()
-        tester.test("GET /api/analysis returns 200", True)
-        tester.test("analysis has rows", 'rows' in data)
-        tester.test("analysis has report_review_date", 'report_review_date' in data)
-        tester.test("analysis has settings", 'settings' in data)
+        assert "items" in data, "Response missing 'items' field"
+        print(f"   Found {len(data['items'])} items with criticality=2")
+        for item in data["items"]:
+            assert "criticality" in item, f"Item {item.get('item_code')} missing criticality field"
+            assert item["criticality"] == 2, f"Item {item.get('item_code')} has criticality {item['criticality']}, expected 2"
+        print(f"   ✓ All items have criticality=2")
+
+    tester.test("GET /api/items?criticality=2 returns only criticality 2 items", test_items_criticality_filter_2)
+
+    # Test 3: GET /api/items?criticality=3 returns only criticality 3 items
+    def test_items_criticality_filter_3():
+        resp = requests.get(f"{BASE_URL}/items", params={"criticality": "3", "page_size": 100})
+        assert resp.status_code == 200, f"Expected 200, got {resp.status_code}"
+        data = resp.json()
+        assert "items" in data, "Response missing 'items' field"
+        print(f"   Found {len(data['items'])} items with criticality=3")
+        for item in data["items"]:
+            assert "criticality" in item, f"Item {item.get('item_code')} missing criticality field"
+            assert item["criticality"] == 3, f"Item {item.get('item_code')} has criticality {item['criticality']}, expected 3"
+        print(f"   ✓ All items have criticality=3")
+
+    tester.test("GET /api/items?criticality=3 returns only criticality 3 items", test_items_criticality_filter_3)
+
+    # Test 4: GET /api/items?criticality=all returns all items
+    def test_items_criticality_filter_all():
+        resp = requests.get(f"{BASE_URL}/items", params={"criticality": "all", "page_size": 100})
+        assert resp.status_code == 200, f"Expected 200, got {resp.status_code}"
+        data = resp.json()
+        assert "items" in data, "Response missing 'items' field"
+        print(f"   Found {data['total']} total items")
+        assert data['total'] > 0, "Expected at least some items"
+        print(f"   ✓ Returns all items regardless of criticality")
+
+    tester.test("GET /api/items?criticality=all returns all items", test_items_criticality_filter_all)
+
+    # Test 5: GET /api/dashboard returns by_criticality array
+    def test_dashboard_by_criticality():
+        resp = requests.get(f"{BASE_URL}/dashboard")
+        assert resp.status_code == 200, f"Expected 200, got {resp.status_code}"
+        data = resp.json()
+        assert "by_criticality" in data, "Response missing 'by_criticality' field"
+        by_crit = data["by_criticality"]
+        assert isinstance(by_crit, list), "by_criticality should be a list"
+        assert len(by_crit) == 3, f"Expected 3 tiers, got {len(by_crit)}"
         
-        # Check if SPECTEST1 appears
-        rows = data.get('rows', [])
-        spectest1_found = any(r.get('item_code') == 'SPECTEST1' for r in rows)
-        tester.test("SPECTEST1 appears in analysis", spectest1_found)
+        for tier in by_crit:
+            assert "criticality" in tier, "Tier missing 'criticality' field"
+            assert "label" in tier, "Tier missing 'label' field"
+            assert "count" in tier, "Tier missing 'count' field"
+            assert "value" in tier, "Tier missing 'value' field"
+            assert "pct" in tier, "Tier missing 'pct' field"
+            print(f"   Tier {tier['criticality']}: {tier['label']} - {tier['count']} items, ${tier['value']}, {tier['pct']}%")
         
-        # Test with_consumption_only toggle
-        resp2 = tester.api_call("GET", "analysis?with_consumption_only=true")
-        if resp2 and resp2.status_code == 200:
-            tester.test("GET /api/analysis?with_consumption_only=true", True)
-    else:
-        tester.test("GET /api/analysis returns 200", False)
+        print(f"   ✓ by_criticality has 3 tiers with all required fields")
 
-    # ========================================================================
-    # STEP 6: Test GET /api/settings
-    # ========================================================================
-    print("\n📝 STEP 6: Testing GET /api/settings...")
-    resp = tester.api_call("GET", "settings")
-    
-    if resp and resp.status_code == 200:
-        settings = resp.json()
-        tester.test("GET /api/settings returns 200", True)
-        tester.test("settings has lead_time_months", 'lead_time_months' in settings)
-        tester.test("settings has max_demand_months", 'max_demand_months' in settings)
-        tester.test("settings has non_moving_months", 'non_moving_months' in settings)
-        tester.test("lead_time_months default is 3", settings.get('lead_time_months') == 3, 3, settings.get('lead_time_months'))
-        tester.test("max_demand_months default is 6", settings.get('max_demand_months') == 6, 6, settings.get('max_demand_months'))
-        tester.test("non_moving_months default is 12", settings.get('non_moving_months') == 12, 12, settings.get('non_moving_months'))
-    else:
-        tester.test("GET /api/settings returns 200", False)
+    tester.test("GET /api/dashboard returns by_criticality array with 3 tiers", test_dashboard_by_criticality)
 
-    # ========================================================================
-    # STEP 7: Test PUT /api/settings
-    # ========================================================================
-    print("\n📝 STEP 7: Testing PUT /api/settings...")
-    resp = tester.api_call("PUT", "settings", json={
-        "lead_time_months": 3,
-        "max_demand_months": 6,
-        "non_moving_months": 12
-    })
-    
-    if resp and resp.status_code == 200:
-        tester.test("PUT /api/settings returns 200", True)
-        settings = resp.json()
-        tester.test("PUT settings: lead_time_months", settings.get('lead_time_months') == 3)
-        tester.test("PUT settings: max_demand_months", settings.get('max_demand_months') == 6)
-        tester.test("PUT settings: non_moving_months", settings.get('non_moving_months') == 12)
-    else:
-        tester.test("PUT /api/settings returns 200", False)
+    # Test 6: GET /api/dashboard/critical returns critical materials data
+    def test_dashboard_critical():
+        resp = requests.get(f"{BASE_URL}/dashboard/critical")
+        assert resp.status_code == 200, f"Expected 200, got {resp.status_code}"
+        data = resp.json()
+        
+        # Check required fields
+        required_fields = ["total_count", "total_value", "reorder_count", "below_min_count", "by_tier", "at_risk"]
+        for field in required_fields:
+            assert field in data, f"Response missing '{field}' field"
+        
+        print(f"   Total Count: {data['total_count']}")
+        print(f"   Total Value: ${data['total_value']}")
+        print(f"   Reorder Count: {data['reorder_count']}")
+        print(f"   Below Min Count: {data['below_min_count']}")
+        
+        # Check by_tier structure
+        by_tier = data["by_tier"]
+        assert isinstance(by_tier, list), "by_tier should be a list"
+        assert len(by_tier) == 2, f"Expected 2 tiers (1 & 2), got {len(by_tier)}"
+        
+        for tier in by_tier:
+            assert "criticality" in tier, "Tier missing 'criticality' field"
+            assert tier["criticality"] in [1, 2], f"Expected tier 1 or 2, got {tier['criticality']}"
+            assert "label" in tier, "Tier missing 'label' field"
+            assert "count" in tier, "Tier missing 'count' field"
+            assert "value" in tier, "Tier missing 'value' field"
+            assert "below_min" in tier, "Tier missing 'below_min' field"
+            assert "minimum" in tier, "Tier missing 'minimum' field"
+            assert "ok" in tier, "Tier missing 'ok' field"
+            assert "above_max" in tier, "Tier missing 'above_max' field"
+            print(f"   Tier {tier['criticality']}: below_min={tier['below_min']}, minimum={tier['minimum']}, ok={tier['ok']}, above_max={tier['above_max']}")
+        
+        # Check at_risk list
+        at_risk = data["at_risk"]
+        assert isinstance(at_risk, list), "at_risk should be a list"
+        print(f"   At-risk items: {len(at_risk)}")
+        
+        print(f"   ✓ Critical dashboard has all required fields and structure")
 
-    # ========================================================================
-    # STEP 8: Test GET /api/export/analysis
-    # ========================================================================
-    print("\n📝 STEP 8: Testing GET /api/export/analysis...")
-    resp = tester.api_call("GET", "export/analysis")
-    
-    if resp and resp.status_code == 200:
-        tester.test("GET /api/export/analysis returns 200", True)
-        tester.test("export/analysis returns xlsx", 'spreadsheet' in resp.headers.get('Content-Type', ''))
-    else:
-        tester.test("GET /api/export/analysis returns 200", False)
+    tester.test("GET /api/dashboard/critical returns complete critical materials data", test_dashboard_critical)
 
-    # ========================================================================
-    # STEP 9: Test criticality normalization
-    # ========================================================================
-    print("\n📝 STEP 9: Testing criticality normalization...")
-    
-    # Test invalid criticality (7) -> should normalize to 3
-    resp = tester.api_call("PUT", "items/SPECTEST1", json={"criticality": 7})
-    if resp and resp.status_code == 200:
-        item = resp.json()
-        tester.test("Criticality 7 normalized to 3", item.get('criticality') == 3, 3, item.get('criticality'))
-    
-    # Test creating item without criticality -> should default to 3
-    resp = tester.api_call("POST", "items", json={
-        "item_code": "SPECTEST2",
-        "description": "Test Item 2",
-        "uom": "PCS",
-        "item_type": "Other",
-        "min_qty": 0,
-        "max_qty": 0,
-        "current_qty": 0,
-        "unit_price": 10.0
-    })
-    if resp and resp.status_code == 200:
-        item = resp.json()
-        tester.test("Default criticality is 3", item.get('criticality') == 3, 3, item.get('criticality'))
+    # Test 7: GET /api/export/inventory returns Excel with new columns
+    def test_export_inventory_columns():
+        resp = requests.get(f"{BASE_URL}/export/inventory")
+        assert resp.status_code == 200, f"Expected 200, got {resp.status_code}"
+        assert resp.headers.get("Content-Type") == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", \
+            f"Expected Excel content type, got {resp.headers.get('Content-Type')}"
+        
+        # Parse Excel
+        df = pd.read_excel(BytesIO(resp.content), sheet_name="Inventory", skiprows=4)
+        columns = list(df.columns)
+        print(f"   Excel columns: {columns}")
+        
+        assert "Criticality Label" in columns, "Missing 'Criticality Label' column"
+        assert "Avg Yearly Consumption" in columns, "Missing 'Avg Yearly Consumption' column"
+        
+        print(f"   ✓ Excel export contains 'Criticality Label' and 'Avg Yearly Consumption' columns")
 
-    # ========================================================================
-    # STEP 10: Regression tests
-    # ========================================================================
-    print("\n📝 STEP 10: Running regression tests...")
-    
-    endpoints = [
-        ("GET", "dashboard"),
-        ("GET", "reorder"),
-        ("GET", "reports/monthly-snapshot"),
-        ("GET", "non-moving"),
-        ("GET", "export/inventory"),
-    ]
-    
-    for method, endpoint in endpoints:
-        resp = tester.api_call(method, endpoint)
-        tester.test(f"{method} /api/{endpoint} returns 200", resp and resp.status_code == 200)
+    tester.test("GET /api/export/inventory returns Excel with Criticality Label and Avg Yearly Consumption", test_export_inventory_columns)
 
-    # ========================================================================
-    # CLEANUP
-    # ========================================================================
-    print("\n📝 CLEANUP: Note - Manual MongoDB cleanup required for:")
-    print("   - SPECTEST1 transactions (db.transactions.delete_many({item_code:'SPECTEST1'}))")
-    print("   - SPECTEST1 item (db.items.delete_one({item_code:'SPECTEST1'}))")
-    print("   - SPECTEST2 item (db.items.delete_one({item_code:'SPECTEST2'}))")
+    # Test 8: GET /api/export/critical returns Excel for critical items
+    def test_export_critical():
+        resp = requests.get(f"{BASE_URL}/export/critical")
+        assert resp.status_code == 200, f"Expected 200, got {resp.status_code}"
+        assert resp.headers.get("Content-Type") == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", \
+            f"Expected Excel content type, got {resp.headers.get('Content-Type')}"
+        
+        # Parse Excel
+        df = pd.read_excel(BytesIO(resp.content), sheet_name="Critical Materials", skiprows=4)
+        print(f"   Excel has {len(df)} rows")
+        
+        # Check that all items are criticality 1 or 2
+        if len(df) > 0:
+            assert "Criticality" in df.columns, "Missing 'Criticality' column"
+            for idx, row in df.iterrows():
+                crit = row["Criticality"]
+                assert crit in [1, 2], f"Row {idx} has criticality {crit}, expected 1 or 2"
+            print(f"   ✓ All items are criticality 1 or 2")
+        else:
+            print(f"   ⚠ No critical items in export (this is OK if dataset has no Tier 1/2 items)")
 
-    # ========================================================================
-    # SUMMARY
-    # ========================================================================
-    print("\n" + "=" * 80)
-    print("TEST SUMMARY")
-    print("=" * 80)
-    print(f"Total tests: {tester.tests_run}")
-    print(f"✅ Passed: {tester.tests_passed}")
-    print(f"❌ Failed: {tester.tests_failed}")
-    
-    if tester.tests_failed > 0:
-        print("\nFailed tests:")
-        for failure in tester.failures:
-            print(f"  - {failure}")
-    
-    success_rate = (tester.tests_passed / tester.tests_run * 100) if tester.tests_run > 0 else 0
-    print(f"\nSuccess rate: {success_rate:.1f}%")
-    
-    return 0 if tester.tests_failed == 0 else 1
+    tester.test("GET /api/export/critical returns Excel with critical items only", test_export_critical)
+
+    # Test 9: POST /api/items/auto-classify with dry_run=true
+    def test_auto_classify_dry_run():
+        resp = requests.post(f"{BASE_URL}/items/auto-classify", json={
+            "dry_run": True,
+            "only_unclassified": True
+        })
+        assert resp.status_code == 200, f"Expected 200, got {resp.status_code}"
+        data = resp.json()
+        
+        required_fields = ["scanned", "suggested_counts", "changes", "samples", "applied", "dry_run", "only_unclassified"]
+        for field in required_fields:
+            assert field in data, f"Response missing '{field}' field"
+        
+        assert data["dry_run"] == True, "dry_run should be True"
+        assert data["applied"] == 0, f"dry_run should not apply changes, but applied={data['applied']}"
+        
+        print(f"   Scanned: {data['scanned']} items")
+        print(f"   Suggested counts: {data['suggested_counts']}")
+        print(f"   Changes: {data['changes']}")
+        print(f"   Samples: {len(data['samples'])}")
+        print(f"   Applied: {data['applied']} (should be 0 for dry_run)")
+        
+        print(f"   ✓ Dry run returns preview without modifying data")
+
+    tester.test("POST /api/items/auto-classify with dry_run=true returns preview", test_auto_classify_dry_run)
+
+    # Test 10: POST /api/items/auto-classify with dry_run=false (apply)
+    def test_auto_classify_apply():
+        # First get a dry run to see if there are changes
+        dry_resp = requests.post(f"{BASE_URL}/items/auto-classify", json={
+            "dry_run": True,
+            "only_unclassified": True
+        })
+        dry_data = dry_resp.json()
+        
+        if dry_data["changes"] == 0:
+            print(f"   ⚠ No changes to apply (all items already classified correctly)")
+            print(f"   ✓ Test passed (no changes expected)")
+            return
+        
+        # Now apply
+        resp = requests.post(f"{BASE_URL}/items/auto-classify", json={
+            "dry_run": False,
+            "only_unclassified": True
+        })
+        assert resp.status_code == 200, f"Expected 200, got {resp.status_code}"
+        data = resp.json()
+        
+        assert data["dry_run"] == False, "dry_run should be False"
+        assert data["applied"] > 0, f"Expected some items to be applied, got {data['applied']}"
+        
+        print(f"   Scanned: {data['scanned']} items")
+        print(f"   Changes: {data['changes']}")
+        print(f"   Applied: {data['applied']}")
+        
+        print(f"   ✓ Apply mode successfully modified {data['applied']} items")
+
+    tester.test("POST /api/items/auto-classify with dry_run=false applies changes", test_auto_classify_apply)
+
+    # Test 11: GET /api/analysis includes avg_monthly and avg_yearly consumption
+    def test_analysis_consumption_columns():
+        resp = requests.get(f"{BASE_URL}/analysis", params={"page_size": 10})
+        assert resp.status_code == 200, f"Expected 200, got {resp.status_code}"
+        data = resp.json()
+        
+        assert "rows" in data, "Response missing 'rows' field"
+        rows = data["rows"]
+        
+        if len(rows) > 0:
+            for row in rows:
+                assert "stats" in row, f"Row for {row.get('item_code')} missing 'stats' field"
+                stats = row["stats"]
+                assert "avg_monthly_consumption" in stats, f"Stats missing 'avg_monthly_consumption'"
+                assert "avg_yearly_consumption" in stats, f"Stats missing 'avg_yearly_consumption'"
+                print(f"   {row['item_code']}: avg_monthly={stats['avg_monthly_consumption']}, avg_yearly={stats['avg_yearly_consumption']}")
+            
+            print(f"   ✓ All {len(rows)} rows have avg_monthly_consumption and avg_yearly_consumption")
+        else:
+            print(f"   ⚠ No analysis rows (no consumption data yet)")
+            print(f"   ✓ Test passed (empty result is valid)")
+
+    tester.test("GET /api/analysis includes avg_monthly and avg_yearly consumption", test_analysis_consumption_columns)
+
+    # Test 12: Verify criticality field is present in items
+    def test_items_have_criticality_field():
+        resp = requests.get(f"{BASE_URL}/items", params={"page_size": 50})
+        assert resp.status_code == 200, f"Expected 200, got {resp.status_code}"
+        data = resp.json()
+        
+        assert "items" in data, "Response missing 'items' field"
+        items = data["items"]
+        assert len(items) > 0, "Expected at least some items"
+        
+        for item in items:
+            assert "criticality" in item, f"Item {item.get('item_code')} missing 'criticality' field"
+            assert item["criticality"] in [1, 2, 3], f"Item {item.get('item_code')} has invalid criticality {item['criticality']}"
+        
+        print(f"   ✓ All {len(items)} items have valid criticality field (1, 2, or 3)")
+
+    tester.test("Items have criticality field with valid values", test_items_have_criticality_field)
+
+    # Print summary and return exit code
+    success = tester.summary()
+    return 0 if success else 1
+
 
 if __name__ == "__main__":
     sys.exit(main())

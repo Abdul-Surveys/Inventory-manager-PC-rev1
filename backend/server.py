@@ -1828,6 +1828,31 @@ async def import_transactions(file: UploadFile = File(...), apply_to_stock: bool
     }
 
 
+# ---------------------------- Offline Desktop App download ----------------------------
+
+OFFLINE_APP_DIR = ROOT_DIR / "offline_app"
+
+
+@api_router.get("/download/offline-app")
+async def download_offline_app():
+    """Package the self-contained offline desktop edition as a ZIP for download."""
+    if not OFFLINE_APP_DIR.exists():
+        raise HTTPException(status_code=404, detail="Offline app package not found")
+    import zipfile
+    buf = io.BytesIO()
+    top = "PetroChina-GPP-Inventory-Offline"
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for f in sorted(OFFLINE_APP_DIR.iterdir()):
+            if f.is_file():
+                zf.write(f, arcname=f"{top}/{f.name}")
+    buf.seek(0)
+    return StreamingResponse(
+        buf,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{top}.zip"'},
+    )
+
+
 # ---------------------------- App wiring ----------------------------
 
 app.include_router(api_router)

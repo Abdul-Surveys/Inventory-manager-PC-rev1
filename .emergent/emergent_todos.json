@@ -1,18 +1,22 @@
 [
   {
-    "content": "Criticality Trend on Monthly Report (backend + chart)",
+    "content": "Bundle SheetJS (xlsx) library locally for offline Excel import/export",
     "status": "completed"
   },
   {
-    "content": "Critical-first Reorder Proposals (backend sort + filter + column)",
+    "content": "Build self-contained offline SPA (index.html) - Dashboard, Inventory CRUD, Transactions CRUD, Reorder, Settings, Data import/backup, localStorage persistence",
     "status": "completed"
   },
   {
-    "content": "Bulk criticality set on Inventory (backend + UI)",
+    "content": "Add README + backend /api/download/offline-app zip endpoint",
     "status": "completed"
   },
   {
-    "content": "Test all three new features",
+    "content": "Add download button/card on Settings page",
+    "status": "completed"
+  },
+  {
+    "content": "Test: zip download + offline app in browser (import, add/edit, persistence)",
     "status": "completed"
   }
 ]

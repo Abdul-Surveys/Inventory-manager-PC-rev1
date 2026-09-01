@@ -5,10 +5,10 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Skeleton } from "@/components/ui/skeleton";
-import { api, getErrorMessage } from "@/lib/api";
+import { api, getErrorMessage, downloadReport } from "@/lib/api";
 import { CRITICALITY_META } from "@/lib/format";
 import { toast } from "sonner";
-import { Save, Calculator, ShieldCheck, Wand2, Sparkles } from "lucide-react";
+import { Save, Calculator, ShieldCheck, Wand2, Sparkles, MonitorDown, HardDriveDownload } from "lucide-react";
 
 const FIELDS = [
   { key: "lead_time_months", label: "Lead Time (months)", desc: "Time from placing an order until material arrives. Spec default: 90 days = 3 months", testId: "settings-lead-time-input" },
@@ -250,6 +250,48 @@ export default function SettingsPage() {
               )}
             </div>
           )}
+        </CardContent>
+      </Card>
+
+      {/* Offline Desktop Edition */}
+      <Card className="col-span-12 rounded-xl shadow-sm" data-testid="offline-download-card">
+        <CardHeader className="pb-3">
+          <CardTitle className="flex items-center gap-2 text-sm font-semibold uppercase tracking-wide text-muted-foreground">
+            <MonitorDown className="h-4 w-4" /> Offline Desktop Edition
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <p className="text-sm text-muted-foreground">
+            Download a fully self-contained copy of the inventory system that runs on any computer with
+            <span className="font-medium text-foreground"> no internet and no server</span>. Unzip the folder and open
+            <span className="font-mono text-xs"> index.html</span> in a browser. You can add and edit items and transactions,
+            import your Excel/CSV data, and view consumption &amp; reorder analytics — all stored locally in that browser.
+          </p>
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+            <div className="rounded-lg border bg-muted/30 px-3 py-2 text-xs">
+              <p className="font-semibold text-foreground">1. Download &amp; unzip</p>
+              <p className="text-muted-foreground">Extract the ZIP anywhere on your PC.</p>
+            </div>
+            <div className="rounded-lg border bg-muted/30 px-3 py-2 text-xs">
+              <p className="font-semibold text-foreground">2. Open index.html</p>
+              <p className="text-muted-foreground">Runs in Chrome, Edge or Firefox.</p>
+            </div>
+            <div className="rounded-lg border bg-muted/30 px-3 py-2 text-xs">
+              <p className="font-semibold text-foreground">3. Import your data</p>
+              <p className="text-muted-foreground">Starts empty — load Excel/CSV in the Data tab.</p>
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-3">
+            <Button
+              data-testid="offline-download-button"
+              onClick={() => { downloadReport("/download/offline-app"); toast.success("Preparing your offline package download..."); }}
+            >
+              <HardDriveDownload className="mr-2 h-4 w-4" /> Download Offline App (.zip)
+            </Button>
+            <span className="text-xs text-muted-foreground">
+              Tip: use the app's <span className="font-medium">Backup to File</span> option regularly to keep a durable copy of your data.
+            </span>
+          </div>
         </CardContent>
       </Card>
     </div>

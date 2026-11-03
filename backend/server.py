@@ -1833,6 +1833,18 @@ async def import_transactions(file: UploadFile = File(...), apply_to_stock: bool
 OFFLINE_APP_DIR = ROOT_DIR / "offline_app"
 
 
+@api_router.get("/health")
+async def health_check():
+    """Lightweight health probe for container orchestration / load balancers."""
+    db_ok = True
+    try:
+        await client.admin.command("ping")
+    except Exception:
+        db_ok = False
+    return {"status": "ok" if db_ok else "degraded", "database": "up" if db_ok else "down",
+            "time": now_iso()}
+
+
 @api_router.get("/download/offline-app")
 async def download_offline_app():
     """Package the self-contained offline desktop edition as a ZIP for download."""

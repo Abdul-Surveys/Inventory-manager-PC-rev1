@@ -1,0 +1,27 @@
+# Keep Docker build contexts small and free of local/secret files.
+**/node_modules
+**/.git
+**/.gitignore
+**/__pycache__
+**/*.pyc
+**/*.pyo
+
+# Never ship local environment files - configuration is injected by compose.
+backend/.env
+frontend/.env
+
+# Build outputs / local artifacts
+frontend/build
+frontend/.cache
+test_reports
+tests
+.emergent
+plan
+plan.md
+*.log
+backend_test*
+
+# The exported image bundle (packaging output) must never re-enter a context.
+deploy/images
+deploy/certs
+deploy/backups

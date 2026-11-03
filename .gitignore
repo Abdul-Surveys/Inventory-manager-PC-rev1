@@ -84,3 +84,9 @@ frontend/node_modules/.cache/default-development/2.pack
 frontend/node_modules/.cache/default-development/5.pack
 frontend/node_modules/.cache/default-development/10.pack
 frontend/node_modules/.cache/default-development/1.pack
+
+# Self-hosting deployment runtime artifacts (never commit)
+deploy/.env
+deploy/certs/
+deploy/backups/
+deploy/images/

@@ -1,22 +1,26 @@
 [
   {
-    "content": "Bundle SheetJS (xlsx) library locally for offline Excel import/export",
+    "content": "Offline cleanup: remove PostHog telemetry + Emergent script from public/index.html; bundle fonts locally (@fontsource); fix same-origin API handling",
     "status": "completed"
   },
   {
-    "content": "Build self-contained offline SPA (index.html) - Dashboard, Inventory CRUD, Transactions CRUD, Reorder, Settings, Data import/backup, localStorage persistence",
+    "content": "Add /api/health endpoint to backend for container healthchecks",
     "status": "completed"
   },
   {
-    "content": "Add README + backend /api/download/offline-app zip endpoint",
+    "content": "Create deploy package: Dockerfiles (backend + frontend/nginx), docker-compose.yml, nginx.conf, .dockerignore",
     "status": "completed"
   },
   {
-    "content": "Add download button/card on Settings page",
+    "content": "Create single config .env.example + install.sh + cert/image/backup/restore scripts + trimmed pinned requirements",
     "status": "completed"
   },
   {
-    "content": "Test: zip download + offline app in browser (import, add/edit, persistence)",
+    "content": "Write docs: IT install guide, offline requirements report, data migration, upgrade/rollback, test evidence, handover checklist",
+    "status": "completed"
+  },
+  {
+    "content": "Verify: frontend prod build clean (no external refs, fonts bundled), backend health, compose valid; create git branch & commit",
     "status": "completed"
   }
 ]

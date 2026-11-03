@@ -90,3 +90,4 @@ deploy/.env
 deploy/certs/
 deploy/backups/
 deploy/images/
+frontend/node_modules/.cache/default-development/0.pack
